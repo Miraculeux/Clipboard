@@ -1,0 +1,28 @@
+name: ClipboardHistory
+options:
+  bundleIdPrefix: com.clipboard
+  deploymentTarget:
+    macOS: "26.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  ClipboardHistory:
+    type: application
+    platform: macOS
+    sources:
+      - path: ClipboardHistory
+        excludes:
+          - "*.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.clipboard.ClipboardHistory
+        PRODUCT_NAME: ClipboardHistory
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026. All rights reserved."
+        CODE_SIGN_ENTITLEMENTS: ClipboardHistory/ClipboardHistory.entitlements
+        SWIFT_VERSION: "5.9"
+        ENABLE_HARDENED_RUNTIME: NO
+        CODE_SIGN_IDENTITY: "-"
