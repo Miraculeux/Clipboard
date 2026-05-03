@@ -72,20 +72,49 @@ struct SettingsView: View {
             }
 
             GroupBox("Shortcut") {
-                HStack(spacing: 8) {
-                    Text("⌘⇧V")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color(NSColor.controlBackgroundColor))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-                        )
-                    Text("Toggle clipboard history panel")
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("⌘⇧V")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color(NSColor.controlBackgroundColor))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+                            )
+                        Text("Toggle clipboard history panel")
+                            .foregroundStyle(.secondary)
+                            .font(.callout)
+                    }
+                    HStack(spacing: 8) {
+                        Text("⌘⌥S")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color(NSColor.controlBackgroundColor))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+                            )
+                        Text("Capture screen region to clipboard")
+                            .foregroundStyle(.secondary)
+                            .font(.callout)
+                    }
+                }
+                .padding(8)
+            }
+
+            GroupBox("Permissions") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Screen capture requires Screen Recording permission. After rebuilds, you may need to toggle ClipboardKit off and on again in System Settings.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                        .font(.callout)
+                    Button("Open Screen Recording Settings…") {
+                        ScreenRecordingPermission.openScreenRecordingSettings()
+                    }
                 }
                 .padding(8)
             }

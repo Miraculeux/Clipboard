@@ -1,0 +1,22 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug ClipboardKit",
+            "program": "${workspaceFolder}/.build/xcode/Build/Products/Debug/ClipboardKit.app/Contents/MacOS/ClipboardKit",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "build (Debug)",
+            "terminal": "integrated",
+            "stopOnEntry": false
+        },
+        {
+            "type": "lldb",
+            "request": "attach",
+            "name": "Attach to ClipboardKit",
+            "program": "${workspaceFolder}/.build/xcode/Build/Products/Debug/ClipboardKit.app/Contents/MacOS/ClipboardKit"
+        }
+    ]
+}

@@ -163,8 +163,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Register Cmd+Shift+V — show clipboard history
         let pasteHotkeyID = EventHotKeyID(signature: signature, id: 1)
-        let modifiers: UInt32 = UInt32(cmdKey | shiftKey)
-        let pasteStatus = RegisterEventHotKey(UInt32(kVK_ANSI_V), modifiers, pasteHotkeyID,
+        let pasteModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        let pasteStatus = RegisterEventHotKey(UInt32(kVK_ANSI_V), pasteModifiers, pasteHotkeyID,
                                               GetApplicationEventTarget(), 0, &hotKeyRef)
         if pasteStatus != noErr {
             print("Failed to register Cmd+Shift+V hotkey: \(pasteStatus)")
@@ -172,29 +172,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("Global hotkey Cmd+Shift+V registered successfully")
         }
 
-        // Register Cmd+Shift+S — interactive screen region snapshot to clipboard
+        // Register Cmd+Option+S — interactive screen region snapshot to clipboard
         let snapHotkeyID = EventHotKeyID(signature: signature, id: 2)
-        let snapStatus = RegisterEventHotKey(UInt32(kVK_ANSI_S), modifiers, snapHotkeyID,
+        let snapModifiers: UInt32 = UInt32(cmdKey | optionKey)
+        let snapStatus = RegisterEventHotKey(UInt32(kVK_ANSI_S), snapModifiers, snapHotkeyID,
                                              GetApplicationEventTarget(), 0, &screenshotHotKeyRef)
         if snapStatus != noErr {
-            print("Failed to register Cmd+Shift+S hotkey: \(snapStatus)")
+            print("Failed to register Cmd+Option+S hotkey: \(snapStatus)")
         } else {
-            print("Global hotkey Cmd+Shift+S registered successfully")
+            print("Global hotkey Cmd+Option+S registered successfully")
         }
     }
 
-    /// Launches macOS's interactive screen-region capture, copying the result to the clipboard.
-    /// Mirrors the Win+Shift+S behaviour: the screen dims, the user drags a region, and the
-    /// resulting image lives only on the pasteboard (no file is written).
+    /// Starts the in-app interactive region capture: a gray overlay covers every screen,
+    /// the user drags out a rectangle (which becomes a clear hole), and the resulting
+    /// image is written to `NSPasteboard.general`.
     func captureScreenRegion() {
-        let task = Process()
-        task.launchPath = "/usr/sbin/screencapture"
-        // -i interactive, -c copy to clipboard, -x silent (no shutter sound)
-        task.arguments = ["-i", "-c", "-x"]
-        do {
-            try task.run()
-        } catch {
-            print("Failed to launch screencapture: \(error)")
-        }
+        // Don't preflight — `CGPreflightScreenCaptureAccess` lies for ScreenCaptureKit
+        // clients. Just begin; ScreenshotCapture surfaces auth failures itself.
+        ScreenshotCapture.shared.begin()
     }
 }

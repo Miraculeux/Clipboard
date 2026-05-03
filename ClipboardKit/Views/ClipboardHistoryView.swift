@@ -82,7 +82,8 @@ struct ClipboardHistoryView: View {
                                 isHovered: hoveredItemId == item.id,
                                 onPaste: { clipboardManager.pasteItem(item) },
                                 onDelete: { clipboardManager.deleteItem(item) },
-                                onPin: { clipboardManager.pinItem(item) }
+                                onPin: { clipboardManager.pinItem(item) },
+                                onSaveAs: { saveImageAs(item) }
                             )
                             .onHover { hovering in
                                 hoveredItemId = hovering ? item.id : nil
@@ -115,6 +116,37 @@ struct ClipboardHistoryView: View {
     private func openSettings() {
         AppDelegate.shared.openSettings()
     }
+
+    private func saveImageAs(_ item: ClipboardItem) {
+        guard item.contentType == .image, let sourcePath = item.fileName else { return }
+        let sourceURL = URL(fileURLWithPath: sourcePath)
+
+        let panel = NSSavePanel()
+        panel.title = "Save Screenshot"
+        panel.canCreateDirectories = true
+        panel.allowedContentTypes = [.png]
+        let stamp = ISO8601DateFormatter().string(from: item.timestamp)
+            .replacingOccurrences(of: ":", with: "-")
+        panel.nameFieldStringValue = "Screenshot \(stamp).png"
+
+        // Make the panel actually appear in front of the popover.
+        NSApp.activate()
+        panel.begin { response in
+            guard response == .OK, let dest = panel.url else { return }
+            do {
+                if FileManager.default.fileExists(atPath: dest.path) {
+                    try FileManager.default.removeItem(at: dest)
+                }
+                try FileManager.default.copyItem(at: sourceURL, to: dest)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t save image"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+        }
+    }
 }
 
 struct ClipboardItemRow: View {
@@ -123,6 +155,7 @@ struct ClipboardItemRow: View {
     let onPaste: () -> Void
     let onDelete: () -> Void
     let onPin: () -> Void
+    let onSaveAs: () -> Void
     @State private var showingImage = false
 
     var body: some View {
@@ -173,25 +206,35 @@ struct ClipboardItemRow: View {
 
             Spacer()
 
-            // Action buttons (show on hover)
-            if isHovered {
-                HStack(spacing: 4) {
-                    Button(action: onPin) {
-                        Image(systemName: "pin")
+            // Action buttons — always present so hover/click hit-testing
+            // stays stable; only the visibility flips on hover.
+            HStack(spacing: 4) {
+                if item.contentType == .image {
+                    Button(action: onSaveAs) {
+                        Image(systemName: "square.and.arrow.down")
                             .font(.caption)
                     }
                     .buttonStyle(.plain)
-                    .help("Move to top")
-
-                    Button(action: onDelete) {
-                        Image(systemName: "trash")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Delete")
+                    .help("Save to…")
                 }
+
+                Button(action: onPin) {
+                    Image(systemName: "pin")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .help("Move to top")
+
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Delete")
             }
+            .opacity(isHovered ? 1 : 0)
+            .allowsHitTesting(isHovered)
         }
         .padding(8)
         .background(isHovered ? Color.accentColor.opacity(0.1) : Color.clear)

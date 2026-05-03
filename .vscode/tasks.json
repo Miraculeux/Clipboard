@@ -1,0 +1,60 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "xcodegen",
+            "type": "shell",
+            "command": "xcodegen generate",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": [],
+            "presentation": { "reveal": "silent", "clear": true }
+        },
+        {
+            "label": "build (Debug)",
+            "type": "shell",
+            "command": "xcodebuild",
+            "args": [
+                "-project", "ClipboardKit.xcodeproj",
+                "-scheme", "ClipboardKit",
+                "-configuration", "Debug",
+                "-derivedDataPath", "${workspaceFolder}/.build/xcode",
+                "-destination", "platform=macOS",
+                "build"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "group": { "kind": "build", "isDefault": true },
+            "problemMatcher": ["$gcc"],
+            "dependsOn": ["xcodegen"],
+            "presentation": { "reveal": "always", "clear": true }
+        },
+        {
+            "label": "clean",
+            "type": "shell",
+            "command": "rm",
+            "args": ["-rf", "${workspaceFolder}/.build/xcode"],
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": []
+        },
+        {
+            "label": "kill running ClipboardKit",
+            "type": "shell",
+            "command": "pkill",
+            "args": ["-x", "ClipboardKit", "||", "true"],
+            "problemMatcher": [],
+            "presentation": { "reveal": "silent" }
+        },
+        {
+            "label": "run",
+            "type": "shell",
+            "command": "open",
+            "args": [
+                "${workspaceFolder}/.build/xcode/Build/Products/Debug/ClipboardKit.app"
+            ],
+            "options": { "cwd": "${workspaceFolder}" },
+            "dependsOrder": "sequence",
+            "dependsOn": ["build (Debug)", "kill running ClipboardKit"],
+            "problemMatcher": [],
+            "presentation": { "reveal": "always" }
+        }
+    ]
+}
