@@ -141,15 +141,8 @@ class ClipboardManager: ObservableObject {
     private func saveImageItem(data: Data) -> ClipboardItem {
         let fileName = UUID().uuidString + ".png"
 
-        // Save to large file storage if needed
-        let storagePath: String
-        if data.count > settings.largeFileThresholdBytes {
-            storagePath = settings.largeFileStoragePath
-        } else {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            storagePath = appSupport.appendingPathComponent("ClipboardKit/Images").path
-        }
-
+        // Always store images in the user-chosen storage location.
+        let storagePath = settings.largeFileStoragePath
         let dirURL = URL(fileURLWithPath: storagePath)
         try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
 
