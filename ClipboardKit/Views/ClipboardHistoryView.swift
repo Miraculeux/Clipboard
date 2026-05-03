@@ -208,11 +208,12 @@ struct ClipboardItemRow: View {
 
             // Action buttons — always present so hover/click hit-testing
             // stays stable; only the visibility flips on hover.
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 if item.contentType == .image {
                     Button(action: onSaveAs) {
                         Image(systemName: "square.and.arrow.down")
-                            .font(.caption)
+                            .font(.system(size: 12, weight: .regular))
+                            .frame(width: 16, height: 16)
                     }
                     .buttonStyle(.plain)
                     .help("Save to…")
@@ -220,14 +221,16 @@ struct ClipboardItemRow: View {
 
                 Button(action: onPin) {
                     Image(systemName: "pin")
-                        .font(.caption)
+                        .font(.system(size: 12, weight: .regular))
+                        .frame(width: 16, height: 16)
                 }
                 .buttonStyle(.plain)
                 .help("Move to top")
 
                 Button(action: onDelete) {
                     Image(systemName: "trash")
-                        .font(.caption)
+                        .font(.system(size: 12, weight: .regular))
+                        .frame(width: 16, height: 16)
                         .foregroundColor(.red)
                 }
                 .buttonStyle(.plain)
