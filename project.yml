@@ -1,4 +1,4 @@
-name: ClipboardHistory
+name: ClipboardKit
 options:
   bundleIdPrefix: com.clipboard
   deploymentTarget:
@@ -7,22 +7,22 @@ options:
   createIntermediateGroups: true
 
 targets:
-  ClipboardHistory:
+  ClipboardKit:
     type: application
     platform: macOS
     sources:
-      - path: ClipboardHistory
+      - path: ClipboardKit
         excludes:
           - "*.entitlements"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.clipboard.ClipboardHistory
-        PRODUCT_NAME: ClipboardHistory
+        PRODUCT_BUNDLE_IDENTIFIER: com.clipboard.ClipboardKit
+        PRODUCT_NAME: ClipboardKit
         MACOSX_DEPLOYMENT_TARGET: "26.0"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSUIElement: YES
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026. All rights reserved."
-        CODE_SIGN_ENTITLEMENTS: ClipboardHistory/ClipboardHistory.entitlements
+        CODE_SIGN_ENTITLEMENTS: ClipboardKit/ClipboardKit.entitlements
         SWIFT_VERSION: "5.9"
         ENABLE_HARDENED_RUNTIME: NO
         CODE_SIGN_IDENTITY: "-"

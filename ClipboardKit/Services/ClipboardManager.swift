@@ -16,7 +16,7 @@ class ClipboardManager: ObservableObject {
 
     private var historyFileURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("ClipboardHistory")
+        let appDir = appSupport.appendingPathComponent("ClipboardKit")
         try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
         return appDir.appendingPathComponent("history.json")
     }
@@ -147,7 +147,7 @@ class ClipboardManager: ObservableObject {
             storagePath = settings.largeFileStoragePath
         } else {
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            storagePath = appSupport.appendingPathComponent("ClipboardHistory/Images").path
+            storagePath = appSupport.appendingPathComponent("ClipboardKit/Images").path
         }
 
         let dirURL = URL(fileURLWithPath: storagePath)

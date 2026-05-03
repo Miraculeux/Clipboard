@@ -1,4 +1,4 @@
-# Clipboard History
+# ClipboardKit
 
 A lightweight clipboard history manager for macOS.
 
@@ -21,22 +21,22 @@ A lightweight clipboard history manager for macOS.
 
 ```bash
 xcodegen generate
-xcodebuild -scheme ClipboardHistory -configuration Release -derivedDataPath build build
+xcodebuild -scheme ClipboardKit -configuration Release -derivedDataPath build build
 ```
 
-The built app will be at `build/Build/Products/Release/ClipboardHistory.app`.
+The built app will be at `build/Build/Products/Release/ClipboardKit.app`.
 
 ## Install
 
 Copy the app to `/Applications`:
 
 ```bash
-cp -R build/Build/Products/Release/ClipboardHistory.app /Applications/
+cp -R build/Build/Products/Release/ClipboardKit.app /Applications/
 ```
 
 ## Usage
 
-1. Launch **ClipboardHistory** — it runs as a menu bar app
+1. Launch **ClipboardKit** — it runs as a menu bar app
 2. Press **⌘⇧V** to open the clipboard history panel
 3. Click any item to paste it
 4. Use the gear icon to open Settings

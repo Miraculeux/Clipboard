@@ -2,13 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClipboardHistory",
+    name: "ClipboardKit",
     platforms: [.macOS(.v26)],
     targets: [
         .executableTarget(
-            name: "ClipboardHistory",
-            path: "ClipboardHistory",
-            exclude: ["ClipboardHistory.entitlements"]
+            name: "ClipboardKit",
+            path: "ClipboardKit",
+            exclude: ["ClipboardKit.entitlements"]
         )
     ]
 )

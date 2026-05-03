@@ -2,8 +2,13 @@ import SwiftUI
 import Carbon.HIToolbox
 
 @main
-struct ClipboardHistoryApp: App {
+struct ClipboardKitApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
+    init() {
+        // Migrate legacy ClipboardHistory data before any singletons read from disk.
+        DataMigration.migrateIfNeeded()
+    }
 
     var body: some Scene {
         Settings {
@@ -23,6 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var settingsManager = SettingsManager.shared
     var previousApp: NSRunningApplication?
     var hotKeyRef: EventHotKeyRef?
+    var screenshotHotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -53,6 +59,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         clipboardManager.stopMonitoring()
         if let ref = hotKeyRef {
+            UnregisterEventHotKey(ref)
+        }
+        if let ref = screenshotHotKeyRef {
             UnregisterEventHotKey(ref)
         }
     }
@@ -122,8 +131,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Install Carbon event handler for hotkey
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let handlerResult = InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
+            var hotkeyID = EventHotKeyID()
+            let status = GetEventParameter(event,
+                                           EventParamName(kEventParamDirectObject),
+                                           EventParamType(typeEventHotKeyID),
+                                           nil,
+                                           MemoryLayout<EventHotKeyID>.size,
+                                           nil,
+                                           &hotkeyID)
+            guard status == noErr else { return status }
+
             DispatchQueue.main.async {
-                AppDelegate.shared?.togglePopover()
+                switch hotkeyID.id {
+                case 1:
+                    AppDelegate.shared?.togglePopover()
+                case 2:
+                    AppDelegate.shared?.captureScreenRegion()
+                default:
+                    break
+                }
             }
             return noErr
         }, 1, &eventType, nil, nil)
@@ -133,18 +159,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Register Cmd+Shift+V as global hotkey
-        let hotkeyID = EventHotKeyID(signature: OSType(0x434C4950), // "CLIP"
-                                      id: 1)
-        let modifiers: UInt32 = UInt32(cmdKey | shiftKey)
-        let keyCode: UInt32 = UInt32(kVK_ANSI_V)
+        let signature = OSType(0x434C4950) // "CLIP"
 
-        let status = RegisterEventHotKey(keyCode, modifiers, hotkeyID,
-                                         GetApplicationEventTarget(), 0, &hotKeyRef)
-        if status != noErr {
-            print("Failed to register hotkey: \(status)")
+        // Register Cmd+Shift+V — show clipboard history
+        let pasteHotkeyID = EventHotKeyID(signature: signature, id: 1)
+        let modifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        let pasteStatus = RegisterEventHotKey(UInt32(kVK_ANSI_V), modifiers, pasteHotkeyID,
+                                              GetApplicationEventTarget(), 0, &hotKeyRef)
+        if pasteStatus != noErr {
+            print("Failed to register Cmd+Shift+V hotkey: \(pasteStatus)")
         } else {
             print("Global hotkey Cmd+Shift+V registered successfully")
+        }
+
+        // Register Cmd+Shift+S — interactive screen region snapshot to clipboard
+        let snapHotkeyID = EventHotKeyID(signature: signature, id: 2)
+        let snapStatus = RegisterEventHotKey(UInt32(kVK_ANSI_S), modifiers, snapHotkeyID,
+                                             GetApplicationEventTarget(), 0, &screenshotHotKeyRef)
+        if snapStatus != noErr {
+            print("Failed to register Cmd+Shift+S hotkey: \(snapStatus)")
+        } else {
+            print("Global hotkey Cmd+Shift+S registered successfully")
+        }
+    }
+
+    /// Launches macOS's interactive screen-region capture, copying the result to the clipboard.
+    /// Mirrors the Win+Shift+S behaviour: the screen dims, the user drags a region, and the
+    /// resulting image lives only on the pasteboard (no file is written).
+    func captureScreenRegion() {
+        let task = Process()
+        task.launchPath = "/usr/sbin/screencapture"
+        // -i interactive, -c copy to clipboard, -x silent (no shutter sound)
+        task.arguments = ["-i", "-c", "-x"]
+        do {
+            try task.run()
+        } catch {
+            print("Failed to launch screencapture: \(error)")
         }
     }
 }

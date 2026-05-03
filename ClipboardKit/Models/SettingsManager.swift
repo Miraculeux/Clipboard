@@ -45,7 +45,7 @@ class SettingsManager: ObservableObject {
     private init() {
         // Set defaults
         let defaultStoragePath = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("ClipboardHistory/LargeFiles").path
+            .appendingPathComponent("ClipboardKit/LargeFiles").path
 
         if defaults.object(forKey: Keys.maxHistoryCount) == nil {
             defaults.set(50, forKey: Keys.maxHistoryCount)
