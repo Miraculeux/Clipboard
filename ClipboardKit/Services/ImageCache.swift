@@ -1,0 +1,102 @@
+import Foundation
+import AppKit
+import ImageIO
+
+/// Async, bounded cache of downscaled NSImage thumbnails for clipboard images.
+/// Keeps the SwiftUI list snappy by avoiding synchronous full-resolution
+/// `NSImage(contentsOfFile:)` calls during scrolling.
+final class ThumbnailCache {
+    static let shared = ThumbnailCache()
+
+    private let cache: NSCache<NSString, NSImage> = {
+        let c = NSCache<NSString, NSImage>()
+        c.countLimit = 200
+        return c
+    }()
+    private let queue = DispatchQueue(
+        label: "ClipboardKit.ThumbnailCache",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+
+    private init() {}
+
+    func cachedThumbnail(forPath path: String, maxPixel: CGFloat) -> NSImage? {
+        cache.object(forKey: Self.key(path: path, maxPixel: maxPixel))
+    }
+
+    func loadThumbnail(forPath path: String,
+                       maxPixel: CGFloat,
+                       completion: @escaping (NSImage?) -> Void) {
+        let key = Self.key(path: path, maxPixel: maxPixel)
+        if let img = cache.object(forKey: key) {
+            completion(img)
+            return
+        }
+        queue.async { [weak self] in
+            let img = Self.makeThumbnail(path: path, maxPixel: maxPixel)
+            if let img = img {
+                self?.cache.setObject(img, forKey: key)
+            }
+            DispatchQueue.main.async {
+                completion(img)
+            }
+        }
+    }
+
+    func invalidate(path: String) {
+        // No way to enumerate NSCache keys; remove common max-pixel variants used
+        // by the UI. Cheap and safe.
+        for mp in [80, 160, 320] {
+            cache.removeObject(forKey: Self.key(path: path, maxPixel: CGFloat(mp)))
+        }
+    }
+
+    private static func key(path: String, maxPixel: CGFloat) -> NSString {
+        "\(path)|\(Int(maxPixel))" as NSString
+    }
+
+    private static func makeThumbnail(path: String, maxPixel: CGFloat) -> NSImage? {
+        let url = URL(fileURLWithPath: path) as CFURL
+        guard let src = CGImageSourceCreateWithURL(url, nil) else { return nil }
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
+            return nil
+        }
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+}
+
+/// Tiny in-memory cache for `isDirectory` lookups so SwiftUI rows don't stat
+/// the filesystem on every redraw.
+final class FileTypeCache {
+    static let shared = FileTypeCache()
+
+    private var cache: [String: Bool] = [:]
+    private let lock = NSLock()
+
+    private init() {}
+
+    func isDirectory(_ path: String) -> Bool {
+        lock.lock()
+        if let v = cache[path] {
+            lock.unlock()
+            return v
+        }
+        lock.unlock()
+
+        var isDir: ObjCBool = false
+        FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+        let value = isDir.boolValue
+
+        lock.lock()
+        cache[path] = value
+        lock.unlock()
+        return value
+    }
+}

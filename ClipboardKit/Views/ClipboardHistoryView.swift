@@ -264,27 +264,13 @@ struct ClipboardItemRow: View {
 
     @ViewBuilder
     private func imagePreview(path: String) -> some View {
-        if let nsImage = NSImage(contentsOfFile: path) {
-            Image(nsImage: nsImage)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(maxHeight: 80)
-                .cornerRadius(4)
-        } else {
-            Text("Image not found")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
+        ThumbnailImageView(path: path, maxPixel: 160)
     }
 
     @ViewBuilder
     private func fileIcon(for path: String) -> some View {
         let ext = (path as NSString).pathExtension.lowercased()
-        let isDir = {
-            var isDirectory: ObjCBool = false
-            FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
-            return isDirectory.boolValue
-        }()
+        let isDir = FileTypeCache.shared.isDirectory(path)
         if isDir {
             Image(systemName: "folder.fill")
                 .font(.system(size: 11))
@@ -311,6 +297,57 @@ struct ClipboardItemRow: View {
                 Image(systemName: "doc")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
+/// Async-loading, cached thumbnail view. Avoids decoding full-resolution PNGs
+/// on the main thread while the history list scrolls.
+struct ThumbnailImageView: View {
+    let path: String
+    let maxPixel: CGFloat
+
+    @State private var image: NSImage?
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if let image = image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxHeight: 80)
+                    .cornerRadius(4)
+            } else if failed {
+                Text("Image not found")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            } else {
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.1))
+                    .frame(height: 80)
+                    .cornerRadius(4)
+            }
+        }
+        .onAppear(perform: load)
+        .onChange(of: path) { _ in
+            image = nil
+            failed = false
+            load()
+        }
+    }
+
+    private func load() {
+        if let cached = ThumbnailCache.shared.cachedThumbnail(forPath: path, maxPixel: maxPixel) {
+            self.image = cached
+            return
+        }
+        ThumbnailCache.shared.loadThumbnail(forPath: path, maxPixel: maxPixel) { img in
+            if let img = img {
+                self.image = img
+            } else {
+                self.failed = true
             }
         }
     }
