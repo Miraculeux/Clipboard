@@ -77,26 +77,28 @@ final class ThumbnailCache {
 final class FileTypeCache {
     static let shared = FileTypeCache()
 
-    private var cache: [String: Bool] = [:]
-    private let lock = NSLock()
+    /// `NSCache` gives us automatic LRU-ish eviction under memory pressure and
+    /// a hard count limit, so this never grows without bound (unlike a plain
+    /// dictionary that we'd have to evict by hand).
+    private let cache: NSCache<NSString, NSNumber> = {
+        let c = NSCache<NSString, NSNumber>()
+        c.countLimit = 512
+        return c
+    }()
 
     private init() {}
 
     func isDirectory(_ path: String) -> Bool {
-        lock.lock()
-        if let v = cache[path] {
-            lock.unlock()
-            return v
+        let key = path as NSString
+        if let cached = cache.object(forKey: key) {
+            return cached.boolValue
         }
-        lock.unlock()
 
         var isDir: ObjCBool = false
         FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
         let value = isDir.boolValue
 
-        lock.lock()
-        cache[path] = value
-        lock.unlock()
+        cache.setObject(NSNumber(value: value), forKey: key)
         return value
     }
 }

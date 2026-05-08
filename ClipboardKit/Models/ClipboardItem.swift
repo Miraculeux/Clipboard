@@ -45,8 +45,17 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     }
 
     var formattedSize: String {
-        ByteCountFormatter.string(fromByteCount: Int64(originalSize), countStyle: .file)
+        Self.byteFormatter.string(fromByteCount: Int64(originalSize))
     }
+
+    /// Reused across all rows; `ByteCountFormatter` is documented as
+    /// thread-safe for `string(fromByteCount:)`. Per-call construction was
+    /// hot during list scroll because every visible row formats its size.
+    private static let byteFormatter: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.countStyle = .file
+        return f
+    }()
 
     var isLargeFile: Bool {
         return originalSize > 1_000_000 // > 1MB

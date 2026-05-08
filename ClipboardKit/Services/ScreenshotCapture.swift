@@ -100,10 +100,12 @@ final class ScreenshotCapture {
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
 
             // Encode to PNG so any pasteboard observer sees a concrete `public.png` payload.
+            // Skip TIFF: it's uncompressed (~30+ MB for a 4K capture), forces a
+            // second encode pass here, and then ClipboardManager would re-decode
+            // it to derive PNG anyway. Modern macOS consumers handle PNG fine.
             let bitmap = NSBitmapImageRep(cgImage: cgImage)
             bitmap.size = screenRect.size
-            guard let pngData = bitmap.representation(using: .png, properties: [:]),
-                  let tiffData = bitmap.tiffRepresentation else {
+            guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
                 print("Screenshot: failed to encode image data")
                 NSSound.beep()
                 return
@@ -113,7 +115,6 @@ final class ScreenshotCapture {
                 let pb = NSPasteboard.general
                 pb.clearContents()
                 pb.setData(pngData, forType: .png)
-                pb.setData(tiffData, forType: .tiff)
             }
         } catch {
             let nsError = error as NSError
@@ -179,6 +180,11 @@ private final class SelectionView: NSView {
 
     private var startPoint: NSPoint?
     private var currentRect: NSRect?
+    /// Previous selection rect, used to compute a minimal dirty union so we
+    /// don't invalidate the whole (potentially 5K) overlay on every drag
+    /// frame. Without this, ProMotion can fire `mouseDragged` ~120 times per
+    /// second, each repainting millions of pixels.
+    private var previousRect: NSRect?
 
     override var isFlipped: Bool { false }
     override var acceptsFirstResponder: Bool { true }
@@ -191,15 +197,37 @@ private final class SelectionView: NSView {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         startPoint = p
-        currentRect = NSRect(origin: p, size: .zero)
-        needsDisplay = true
+        let newRect = NSRect(origin: p, size: .zero)
+        invalidate(from: currentRect, to: newRect)
+        currentRect = newRect
+        previousRect = newRect
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let start = startPoint else { return }
         let p = convert(event.locationInWindow, from: nil)
-        currentRect = Self.rect(from: start, to: p)
-        needsDisplay = true
+        let newRect = Self.rect(from: start, to: p)
+        invalidate(from: previousRect, to: newRect)
+        currentRect = newRect
+        previousRect = newRect
+    }
+
+    /// Mark only the union of the old and new selection rects as needing
+    /// redraw (with a small inset so the 1-px border isn't clipped).
+    /// AppKit then clips `draw(_:)`'s drawing context to this rect, so the
+    /// existing fill code automatically becomes incremental.
+    private func invalidate(from oldRect: NSRect?, to newRect: NSRect) {
+        let union: NSRect
+        if let oldRect = oldRect {
+            union = oldRect.union(newRect)
+        } else {
+            union = newRect
+        }
+        // Inset by -2 to cover the 1-px stroke + AA fringe on both sides.
+        let dirty = union.insetBy(dx: -2, dy: -2).intersection(bounds)
+        if !dirty.isEmpty {
+            setNeedsDisplay(dirty)
+        }
     }
 
     override func mouseUp(with event: NSEvent) {

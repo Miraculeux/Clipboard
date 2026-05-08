@@ -70,11 +70,11 @@ class ClipboardManager: ObservableObject {
         guard currentCount != lastChangeCount else { return }
         lastChangeCount = currentCount
 
-        // NSPasteboard is documented as thread-safe; do the (potentially
-        // expensive) read + image encoding off the main thread.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.captureClipboard()
-        }
+        // NSPasteboard isn't documented as thread-safe — keep all reads on the
+        // main thread (we're already here, called from a Timer). Heavy work
+        // like image encoding and disk I/O is dispatched to background queues
+        // by the individual branches in `captureClipboard`.
+        captureClipboard()
     }
 
     private func captureClipboard() {
@@ -100,65 +100,82 @@ class ClipboardManager: ObservableObject {
             }
 
             if !filePaths.isEmpty {
-                let totalSize = filePaths.reduce(0) { acc, path in
-                    acc + ((try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0)
+                // `attributesOfItem` is a syscall per file; do the size sum
+                // off-main and assemble the item from the background.
+                let captured = filePaths
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    let totalSize = captured.reduce(0) { acc, path in
+                        acc + ((try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0)
+                    }
+                    let item = ClipboardItem(
+                        id: UUID(),
+                        timestamp: Date(),
+                        contentType: .fileURL,
+                        textContent: captured.joined(separator: "\n"),
+                        fileName: nil,
+                        filePaths: captured,
+                        originalSize: totalSize
+                    )
+                    self?.addItem(item)
                 }
-                let item = ClipboardItem(
-                    id: UUID(),
-                    timestamp: Date(),
-                    contentType: .fileURL,
-                    textContent: filePaths.joined(separator: "\n"),
-                    fileName: nil,
-                    filePaths: filePaths,
-                    originalSize: totalSize
-                )
-                addItem(item)
                 return
             }
         }
 
-        // Check for image. Encoding to PNG can be ~30–100ms for 4K screenshots,
-        // so do it off the main thread. `addItem` already hops back to main.
-        if let imageData = pasteboard.data(forType: .tiff) ?? pasteboard.data(forType: .png) {
+        // Image: read on main (NSPasteboard isn't thread-safe), then hand the
+        // raw Data off to a background queue for PNG encode + disk write.
+        // Prefer the source's PNG when available; fall back to TIFF.
+        let pngData = pasteboard.data(forType: .png)
+        let tiffData = pngData == nil ? pasteboard.data(forType: .tiff) : nil
+        if let imageData = pngData ?? tiffData {
+            let isAlreadyPNG = pngData != nil
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
-                let item = self.saveImageItem(data: imageData)
+                let item = self.saveImageItem(data: imageData, isAlreadyPNG: isAlreadyPNG)
                 self.addItem(item)
             }
             return
         }
 
-        // Check for rich text
+        // Rich text: read on main, offload large-text disk write to background.
         if let rtfData = pasteboard.data(forType: .rtf),
            let attrString = NSAttributedString(rtf: rtfData, documentAttributes: nil) {
             let plainText = attrString.string
-            let (preview, sidecar) = offloadLargeTextIfNeeded(plainText)
-            let item = ClipboardItem(
-                id: UUID(),
-                timestamp: Date(),
-                contentType: .richText,
-                textContent: preview,
-                fileName: sidecar,
-                filePaths: nil,
-                originalSize: rtfData.count
-            )
-            addItem(item)
+            let originalSize = rtfData.count
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+                let (preview, sidecar) = self.offloadLargeTextIfNeeded(plainText)
+                let item = ClipboardItem(
+                    id: UUID(),
+                    timestamp: Date(),
+                    contentType: .richText,
+                    textContent: preview,
+                    fileName: sidecar,
+                    filePaths: nil,
+                    originalSize: originalSize
+                )
+                self.addItem(item)
+            }
             return
         }
 
         // Plain text
         if let text = pasteboard.string(forType: .string), !text.isEmpty {
-            let (preview, sidecar) = offloadLargeTextIfNeeded(text)
-            let item = ClipboardItem(
-                id: UUID(),
-                timestamp: Date(),
-                contentType: .text,
-                textContent: preview,
-                fileName: sidecar,
-                filePaths: nil,
-                originalSize: text.utf8.count
-            )
-            addItem(item)
+            let originalSize = text.utf8.count
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+                let (preview, sidecar) = self.offloadLargeTextIfNeeded(text)
+                let item = ClipboardItem(
+                    id: UUID(),
+                    timestamp: Date(),
+                    contentType: .text,
+                    textContent: preview,
+                    fileName: sidecar,
+                    filePaths: nil,
+                    originalSize: originalSize
+                )
+                self.addItem(item)
+            }
             return
         }
     }
@@ -171,9 +188,10 @@ class ClipboardManager: ObservableObject {
         guard utf8Count > Self.largeTextThresholdBytes else {
             return (text, nil)
         }
+        // SettingsManager creates the storage dir at startup and on path
+        // changes — don't repeat the syscall on every capture.
         let storagePath = settings.largeFileStoragePath
         let dirURL = URL(fileURLWithPath: storagePath)
-        try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
         let fileURL = dirURL.appendingPathComponent(UUID().uuidString + ".txt")
         do {
             try text.write(to: fileURL, atomically: true, encoding: .utf8)
@@ -189,19 +207,25 @@ class ClipboardManager: ObservableObject {
         return (preview, fileURL.path)
     }
 
-    private func saveImageItem(data: Data) -> ClipboardItem {
+    private func saveImageItem(data: Data, isAlreadyPNG: Bool) -> ClipboardItem {
         let fileName = UUID().uuidString + ".png"
 
         // Always store images in the user-chosen storage location.
+        // SettingsManager creates the directory at startup and whenever the
+        // user changes the path, so we don't pay a syscall here per capture.
         let storagePath = settings.largeFileStoragePath
         let dirURL = URL(fileURLWithPath: storagePath)
-        try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
 
         let fileURL = dirURL.appendingPathComponent(fileName)
 
-        // Convert TIFF to PNG for storage
-        if let bitmapRep = NSBitmapImageRep(data: data),
-           let pngData = bitmapRep.representation(using: .png, properties: [:]) {
+        if isAlreadyPNG {
+            // Source pasteboard payload is already PNG — write it through
+            // verbatim. This avoids a costly decode + re-encode pass that for
+            // a 4K screenshot can run 30–100ms of pure CPU work.
+            try? data.write(to: fileURL)
+        } else if let bitmapRep = NSBitmapImageRep(data: data),
+                  let pngData = bitmapRep.representation(using: .png, properties: [:]) {
+            // TIFF → PNG conversion path.
             try? pngData.write(to: fileURL)
         } else {
             try? data.write(to: fileURL)
@@ -396,12 +420,17 @@ class ClipboardManager: ObservableObject {
     }
 
     /// Force any pending write to complete synchronously (e.g. on terminate).
-    /// Called on the main thread, so we can read `history` directly and write
-    /// inline rather than bouncing through the save queue.
+    /// Runs the write on the save queue so we don't tie up the main thread
+    /// with a JSON encode + atomic file write — and we serialize cleanly
+    /// against any in-flight save the queue had already started.
     private func flushPendingSave() {
         pendingSave?.cancel()
         pendingSave = nil
-        Self.writeHistory(history, to: historyFileURL)
+        let snapshot = history
+        let url = historyFileURL
+        saveQueue.sync {
+            Self.writeHistory(snapshot, to: url)
+        }
     }
 
     private static func writeHistory(_ items: [ClipboardItem], to url: URL) {
@@ -444,21 +473,29 @@ class ClipboardManager: ObservableObject {
         // Don't `removeDuplicates` on `history` — our mutators always produce
         // a real change and full-array equality is O(n × text), which is the
         // exact thing we're trying to avoid.
-        filterCancellable = Publishers.CombineLatest(
-            $history,
-            $searchText
-                .debounce(for: .milliseconds(120), scheduler: DispatchQueue.main)
-                .removeDuplicates()
-        )
-        // Move the filter work off the main thread for large histories.
-        .receive(on: DispatchQueue.global(qos: .userInitiated))
-        .map { history, query -> [ClipboardItem] in
-            guard !query.isEmpty else { return history }
-            return history.filter {
-                $0.displayText.range(of: query, options: .caseInsensitive) != nil
+        //
+        // Both inputs are debounced: typing in the search box (120ms) and
+        // bursts of clipboard captures / pin / delete (60ms). Without the
+        // history debounce, every `addItem` immediately re-runs the filter on
+        // a background queue and bounces back to main, which adds up under
+        // rapid copies.
+        let historyStream = $history
+            .debounce(for: .milliseconds(60), scheduler: DispatchQueue.main)
+        let queryStream = $searchText
+            .debounce(for: .milliseconds(120), scheduler: DispatchQueue.main)
+            .removeDuplicates()
+
+        filterCancellable = Publishers.CombineLatest(historyStream, queryStream)
+            // Move the filter work off the main thread for large histories.
+            .receive(on: DispatchQueue.global(qos: .userInitiated))
+            .map { history, query -> [ClipboardItem] in
+                // Fast path: no query → no filtering, no allocation.
+                guard !query.isEmpty else { return history }
+                return history.filter {
+                    $0.displayText.range(of: query, options: .caseInsensitive) != nil
+                }
             }
-        }
-        .receive(on: DispatchQueue.main)
-        .assign(to: \.filteredHistory, on: self)
+            .receive(on: DispatchQueue.main)
+            .assign(to: \.filteredHistory, on: self)
     }
 }

@@ -20,7 +20,13 @@ class SettingsManager: ObservableObject {
     }
 
     @Published var largeFileStoragePath: String {
-        didSet { defaults.set(largeFileStoragePath, forKey: Keys.largeFileStoragePath) }
+        didSet {
+            defaults.set(largeFileStoragePath, forKey: Keys.largeFileStoragePath)
+            // Make sure the new directory exists so ClipboardManager can skip
+            // the per-capture `createDirectory` call. Cheap when the dir is
+            // already there.
+            ensureStorageDirectoryExists()
+        }
     }
 
     @Published var largeFileThresholdMB: Int {
