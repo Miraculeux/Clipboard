@@ -19,6 +19,13 @@ final class ThumbnailCache {
         attributes: .concurrent
     )
 
+    /// Tracks every (path, maxPixel) key currently in the cache so that
+    /// `invalidate(path:)` can drop *all* sizes for that path — not just a
+    /// hardcoded list. Protected by `keysLock` because `loadThumbnail` runs
+    /// on `queue` (concurrent) and `invalidate` runs on the main thread.
+    private var trackedKeys: [String: Set<Int>] = [:]
+    private let keysLock = NSLock()
+
     private init() {}
 
     func cachedThumbnail(forPath path: String, maxPixel: CGFloat) -> NSImage? {
@@ -35,8 +42,11 @@ final class ThumbnailCache {
         }
         queue.async { [weak self] in
             let img = Self.makeThumbnail(path: path, maxPixel: maxPixel)
-            if let img = img {
-                self?.cache.setObject(img, forKey: key)
+            if let img = img, let self = self {
+                self.cache.setObject(img, forKey: key)
+                self.keysLock.lock()
+                self.trackedKeys[path, default: []].insert(Int(maxPixel))
+                self.keysLock.unlock()
             }
             DispatchQueue.main.async {
                 completion(img)
@@ -45,9 +55,10 @@ final class ThumbnailCache {
     }
 
     func invalidate(path: String) {
-        // No way to enumerate NSCache keys; remove common max-pixel variants used
-        // by the UI. Cheap and safe.
-        for mp in [80, 160, 320] {
+        keysLock.lock()
+        let sizes = trackedKeys.removeValue(forKey: path) ?? []
+        keysLock.unlock()
+        for mp in sizes {
             cache.removeObject(forKey: Self.key(path: path, maxPixel: CGFloat(mp)))
         }
     }

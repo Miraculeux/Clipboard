@@ -265,15 +265,15 @@ final class SelectionView: NSView {
             return
         }
 
-        let b = bounds
-        // Top strip
-        NSRect(x: b.minX, y: sel.maxY, width: b.width, height: b.maxY - sel.maxY).fill()
-        // Bottom strip
-        NSRect(x: b.minX, y: b.minY, width: b.width, height: sel.minY - b.minY).fill()
-        // Left strip (between top and bottom strips)
-        NSRect(x: b.minX, y: sel.minY, width: sel.minX - b.minX, height: sel.height).fill()
-        // Right strip
-        NSRect(x: sel.maxX, y: sel.minY, width: b.maxX - sel.maxX, height: sel.height).fill()
+        // Fill the dim region as a single path with even-odd rule: outer
+        // rect minus the selection becomes the four "strips" in one draw
+        // call. AppKit clips this to `dirtyRect`, so we still benefit from
+        // the per-drag invalidation in `invalidate(from:to:)`.
+        let mask = NSBezierPath()
+        mask.appendRect(bounds)
+        mask.appendRect(sel)
+        mask.windingRule = .evenOdd
+        mask.fill()
 
         // Selection border
         NSColor.white.setStroke()

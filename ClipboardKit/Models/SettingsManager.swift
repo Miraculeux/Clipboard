@@ -102,9 +102,15 @@ class SettingsManager: ObservableObject {
     }
 
     func ensureStorageDirectoryExists() {
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: largeFileStoragePath) {
-            try? fm.createDirectory(atPath: largeFileStoragePath, withIntermediateDirectories: true)
+        // `createDirectory(...:withIntermediateDirectories: true)` is
+        // idempotent — no need to stat first. Hop off main so a slow disk
+        // (network share, encrypted volume) can't stall the settings UI.
+        let path = largeFileStoragePath
+        DispatchQueue.global(qos: .utility).async {
+            try? FileManager.default.createDirectory(
+                atPath: path,
+                withIntermediateDirectories: true
+            )
         }
     }
 

@@ -50,16 +50,57 @@ class ClipboardManager: ObservableObject {
 
     // MARK: - Monitoring
 
+    /// The pasteboard server posts this Darwin notification every time the
+    /// general pasteboard mutates. Subscribing to it is essentially free
+    /// (the kernel wakes us only when there's actually a change), and
+    /// replaces the previous ~2 Hz polling timer.
+    private static let pasteboardDarwinChangeName = "com.apple.pasteboard.notify.changed"
+
     func startMonitoring() {
-        let t = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] _ in
+        // Pick up anything already on the pasteboard at launch.
+        checkClipboard()
+
+        // Register a Darwin notification observer. The CFNotificationCallback
+        // is a C function pointer — we can't capture `self` inside it, so we
+        // pass an opaque pointer to `self` as the observer key and bounce
+        // through a static trampoline that hops to the main queue.
+        let observerPtr = Unmanaged.passUnretained(self).toOpaque()
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterAddObserver(
+            center,
+            observerPtr,
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let manager = Unmanaged<ClipboardManager>.fromOpaque(observer).takeUnretainedValue()
+                // The Darwin callback runs on a CF runloop thread; trampoline
+                // to main where the rest of the manager already lives.
+                DispatchQueue.main.async { manager.checkClipboard() }
+            },
+            Self.pasteboardDarwinChangeName as CFString,
+            nil,
+            .deliverImmediately
+        )
+
+        // Safety-net poller in case the Darwin notification ever fails to
+        // deliver (e.g. some sleep / wake races). 3 s with 1.5 s tolerance
+        // gives ~0.2 wake-ups/sec — negligible CPU/battery cost compared to
+        // the previous 0.6 s interval.
+        let t = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.checkClipboard()
         }
-        // Allow the system to coalesce wake-ups; we don't need millisecond accuracy.
-        t.tolerance = 0.2
+        t.tolerance = 1.5
         timer = t
     }
 
     func stopMonitoring() {
+        let observerPtr = Unmanaged.passUnretained(self).toOpaque()
+        let center = CFNotificationCenterGetDarwinNotifyCenter()
+        CFNotificationCenterRemoveObserver(
+            center,
+            observerPtr,
+            CFNotificationName(Self.pasteboardDarwinChangeName as CFString),
+            nil
+        )
         timer?.invalidate()
         timer = nil
         flushPendingSave()

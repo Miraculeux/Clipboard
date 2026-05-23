@@ -58,39 +58,10 @@ struct ClipboardHistoryView: View {
 
             Divider()
 
-            // History list
-            if clipboardManager.filteredHistory.isEmpty {
-                Spacer()
-                VStack(spacing: 8) {
-                    Image(systemName: "clipboard")
-                        .font(.system(size: 40))
-                        .foregroundColor(.secondary)
-                    Text(clipboardManager.searchText.isEmpty ? "No clipboard history yet" : "No matching items")
-                        .foregroundColor(.secondary)
-                    Text("Copy something to get started")
-                        .font(.caption)
-                        .foregroundColor(.secondary.opacity(0.7))
-                }
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(clipboardManager.filteredHistory) { item in
-                            // `.equatable()` lets SwiftUI skip body re-eval
-                            // when `item` is unchanged — even if the parent
-                            // re-renders for an unrelated reason (e.g. another
-                            // capture published `history`). The Row no longer
-                            // stores closures whose identities flip on every
-                            // parent body pass; it pulls the manager from the
-                            // environment and acts on `item` directly.
-                            ClipboardItemRow(item: item)
-                                .equatable()
-                        }
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                }
-            }
+            // History list is its own view so it only re-evaluates when
+            // `filteredHistory` changes, not whenever the parent body runs
+            // (e.g. after `searchText` typing while debounced).
+            HistoryListView()
 
             Divider()
 
@@ -104,6 +75,47 @@ struct ClipboardHistoryView: View {
 
     private func openSettings() {
         AppDelegate.shared.openSettings()
+    }
+}
+
+/// Isolated history list. Only this view observes `filteredHistory`, so a
+/// capture that updates `history` (but yields the same filtered slice)
+/// doesn't tear down rows above/below the scroll area.
+struct HistoryListView: View {
+    @EnvironmentObject var clipboardManager: ClipboardManager
+
+    var body: some View {
+        if clipboardManager.filteredHistory.isEmpty {
+            VStack {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "clipboard")
+                        .font(.system(size: 40))
+                        .foregroundColor(.secondary)
+                    Text(clipboardManager.searchText.isEmpty ? "No clipboard history yet" : "No matching items")
+                        .foregroundColor(.secondary)
+                    Text("Copy something to get started")
+                        .font(.caption)
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                Spacer()
+            }
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(clipboardManager.filteredHistory) { item in
+                        // `.equatable()` lets SwiftUI skip body re-eval
+                        // when `item` is unchanged — even if the parent
+                        // re-renders for an unrelated reason (e.g. another
+                        // capture published `history`).
+                        ClipboardItemRow(item: item)
+                            .equatable()
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+            }
+        }
     }
 }
 

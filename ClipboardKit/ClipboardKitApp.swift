@@ -99,8 +99,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let app = previousApp {
             app.activate()
         }
-        // Small delay to let the OS switch focus before simulating keystrokes
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        // Small delay to let the OS switch focus before simulating keystrokes.
+        // 100ms is enough on all hardware we've measured (M1+, ProMotion);
+        // earlier 200ms was over-conservative and noticeably delayed paste.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             action()
         }
     }

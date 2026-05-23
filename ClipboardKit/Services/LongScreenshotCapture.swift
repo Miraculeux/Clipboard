@@ -386,6 +386,17 @@ final class VerticalStitcher {
     private var gray: [UInt8] = []   // grayWidth * height (downsampled luma for matching)
     private let grayWidth = 64
 
+    /// Scratch buffers reused for each captured frame. Allocated once at the
+    /// frame's native dimensions and reused for the rest of the session —
+    /// avoids tens of MB of allocation churn per second on 4K captures.
+    private var frameRGBAScratch: [UInt8] = []
+    private var frameGrayScratch: [UInt8] = []
+
+    /// Precomputed gray-downsample column lookup so the inner sampling loop
+    /// becomes a single array index, not a multiply+divide+min per pixel.
+    private var grayColumnMap: [Int] = []
+    private var grayColumnMapWidth: Int = -1
+
     /// Confidence threshold for matching (sum-of-squared-diff per gray sample).
     /// Raised from initial 600 so that anti-aliased text, font hinting and
     /// subpixel scroll positions still pass.
@@ -393,16 +404,25 @@ final class VerticalStitcher {
 
     func add(frame: CGImage) -> AddResult {
         frameCount += 1
-        guard let frameRGBA = Self.rgbaBytes(of: frame) else { return .duplicate }
         let frameW = frame.width
         let frameH = frame.height
-        let frameGray = Self.grayDownsample(rgba: frameRGBA, w: frameW, h: frameH, targetW: grayWidth)
+        guard frameW > 0, frameH > 0 else { return .duplicate }
+
+        ensureScratchBuffers(frameW: frameW, frameH: frameH)
+        guard Self.fillRGBA(into: &frameRGBAScratch, from: frame, w: frameW, h: frameH) else {
+            return .duplicate
+        }
+        Self.fillGray(into: &frameGrayScratch,
+                      rgba: frameRGBAScratch,
+                      w: frameW, h: frameH,
+                      targetW: grayWidth,
+                      columnMap: grayColumnMap)
 
         if width == 0 {
             width = frameW
             height = frameH
-            rgba = frameRGBA
-            gray = frameGray
+            rgba = frameRGBAScratch
+            gray = frameGrayScratch
             return .firstFrame(rows: frameH)
         }
 
@@ -414,31 +434,44 @@ final class VerticalStitcher {
         if K >= frameH { return .duplicate }
 
         let canvasStartRow = height - K
+        let gw = grayWidth
+
+        // Inner loop walks two `UnsafeBufferPointer`s by raw index; lifting
+        // the row offsets out of the column loop turns the per-pixel cost
+        // into a single subtract + multiply + add. This is the single
+        // hottest path during a long screenshot capture.
         var bestS = -1
         var bestErr = Int64.max
 
-        for s in 0...(frameH - K) {
-            var err: Int64 = 0
-            var rejected = false
-            for r in 0..<K {
-                let canvasOff = (canvasStartRow + r) * grayWidth
-                let frameOff = (s + r) * grayWidth
-                var rowErr: Int64 = 0
-                for x in 0..<grayWidth {
-                    let d = Int32(gray[canvasOff + x]) - Int32(frameGray[frameOff + x])
-                    rowErr += Int64(d * d)
+        gray.withUnsafeBufferPointer { canvasPtr in
+            frameGrayScratch.withUnsafeBufferPointer { framePtr in
+                let canvasBase = canvasPtr.baseAddress!
+                let frameBase = framePtr.baseAddress!
+                for s in 0...(frameH - K) {
+                    var err: Int64 = 0
+                    var rejected = false
+                    for r in 0..<K {
+                        let canvasRow = canvasBase + (canvasStartRow + r) * gw
+                        let frameRow = frameBase + (s + r) * gw
+                        var rowErr: Int64 = 0
+                        for x in 0..<gw {
+                            let d = Int32(canvasRow[x]) - Int32(frameRow[x])
+                            rowErr &+= Int64(d &* d)
+                        }
+                        err &+= rowErr
+                        if err >= bestErr { rejected = true; break }
+                    }
+                    if !rejected && err < bestErr {
+                        bestErr = err
+                        bestS = s
+                    }
                 }
-                err += rowErr
-                if err >= bestErr { rejected = true; break }
-            }
-            if !rejected && err < bestErr {
-                bestErr = err
-                bestS = s
             }
         }
+
         guard bestS >= 0 else { return .duplicate }
 
-        let perPixel = Double(bestErr) / Double(K * grayWidth)
+        let perPixel = Double(bestErr) / Double(K * gw)
         if perPixel > perPixelRejectThreshold {
             return .lowConfidence(perPixel: perPixel, bestS: bestS)
         }
@@ -446,18 +479,49 @@ final class VerticalStitcher {
         let appendRows = frameH - K - bestS
         if appendRows <= 0 { return .duplicate }
 
-        // Append RGBA rows: frame rows [bestS + K ..< frameH]
+        // Append RGBA rows: frame rows [bestS + K ..< frameH]. We can't slice
+        // through the array boundary cheaply, so reserve capacity then
+        // append via the unsafe pointer of the scratch buffer.
         let rgbaStart = (bestS + K) * width * 4
         let rgbaCount = appendRows * width * 4
-        rgba.append(contentsOf: frameRGBA[rgbaStart..<(rgbaStart + rgbaCount)])
+        rgba.reserveCapacity(rgba.count + rgbaCount)
+        frameRGBAScratch.withUnsafeBufferPointer { ptr in
+            let base = ptr.baseAddress!
+            rgba.append(contentsOf: UnsafeBufferPointer(start: base + rgbaStart, count: rgbaCount))
+        }
 
         // Append matching gray rows.
-        let grayStart = (bestS + K) * grayWidth
-        let grayCount = appendRows * grayWidth
-        gray.append(contentsOf: frameGray[grayStart..<(grayStart + grayCount)])
+        let grayStart = (bestS + K) * gw
+        let grayCount = appendRows * gw
+        gray.reserveCapacity(gray.count + grayCount)
+        frameGrayScratch.withUnsafeBufferPointer { ptr in
+            let base = ptr.baseAddress!
+            gray.append(contentsOf: UnsafeBufferPointer(start: base + grayStart, count: grayCount))
+        }
 
         height += appendRows
         return .appended(rows: appendRows, perPixel: perPixel)
+    }
+
+    private func ensureScratchBuffers(frameW: Int, frameH: Int) {
+        let rgbaCount = frameW * frameH * 4
+        if frameRGBAScratch.count != rgbaCount {
+            frameRGBAScratch = [UInt8](repeating: 0, count: rgbaCount)
+        }
+        let grayCount = grayWidth * frameH
+        if frameGrayScratch.count != grayCount {
+            frameGrayScratch = [UInt8](repeating: 0, count: grayCount)
+        }
+        if grayColumnMapWidth != frameW {
+            // Build the source-x lookup for nearest-neighbour downsample once
+            // per (frameWidth) — usually only built on the first frame.
+            grayColumnMap.removeAll(keepingCapacity: true)
+            grayColumnMap.reserveCapacity(grayWidth)
+            for tx in 0..<grayWidth {
+                grayColumnMap.append(min(frameW - 1, (tx * frameW) / grayWidth))
+            }
+            grayColumnMapWidth = frameW
+        }
     }
 
     func finalize() -> CGImage? {
@@ -484,15 +548,14 @@ final class VerticalStitcher {
     // MARK: Pixel helpers
 
     /// Draw `image` into a tightly-packed RGBA8 (premultiplied last) buffer.
-    private static func rgbaBytes(of image: CGImage) -> [UInt8]? {
-        let w = image.width
-        let h = image.height
-        guard w > 0, h > 0 else { return nil }
+    /// Returns `false` if the bitmap context couldn't be built.
+    private static func fillRGBA(into bytes: inout [UInt8],
+                                 from image: CGImage,
+                                 w: Int, h: Int) -> Bool {
         let bytesPerRow = w * 4
-        var bytes = [UInt8](repeating: 0, count: h * bytesPerRow)
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue).rawValue
-        let ok = bytes.withUnsafeMutableBytes { rawBuf -> Bool in
+        return bytes.withUnsafeMutableBytes { rawBuf -> Bool in
             guard let base = rawBuf.baseAddress,
                   let ctx = CGContext(data: base,
                                       width: w,
@@ -504,24 +567,35 @@ final class VerticalStitcher {
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
             return true
         }
-        return ok ? bytes : nil
     }
 
-    /// Sample a `targetW`-wide grayscale projection from RGBA, one byte per pixel.
-    /// Uses simple nearest-x point sampling — fast and good enough for SSD matching.
-    private static func grayDownsample(rgba: [UInt8], w: Int, h: Int, targetW: Int) -> [UInt8] {
-        var out = [UInt8](repeating: 0, count: targetW * h)
-        let denom = max(1, targetW)
-        for y in 0..<h {
-            for tx in 0..<targetW {
-                let sx = min(w - 1, (tx * w) / denom)
-                let off = (y * w + sx) * 4
-                let r = Int(rgba[off])
-                let g = Int(rgba[off + 1])
-                let b = Int(rgba[off + 2])
-                out[y * targetW + tx] = UInt8((r * 30 + g * 59 + b * 11) / 100)
+    /// Sample `targetW`-wide grayscale projection from `rgba` using a
+    /// precomputed `columnMap[tx] -> sx`. One pixel of output per inner
+    /// iteration; no division, no `min`.
+    private static func fillGray(into out: inout [UInt8],
+                                 rgba: [UInt8],
+                                 w: Int, h: Int,
+                                 targetW: Int,
+                                 columnMap: [Int]) {
+        rgba.withUnsafeBufferPointer { src in
+            out.withUnsafeMutableBufferPointer { dst in
+                let srcBase = src.baseAddress!
+                let dstBase = dst.baseAddress!
+                columnMap.withUnsafeBufferPointer { col in
+                    let colBase = col.baseAddress!
+                    for y in 0..<h {
+                        let rowOffset = y * w * 4
+                        let outRow = dstBase + y * targetW
+                        for tx in 0..<targetW {
+                            let off = rowOffset + colBase[tx] * 4
+                            let r = Int32(srcBase[off])
+                            let g = Int32(srcBase[off &+ 1])
+                            let b = Int32(srcBase[off &+ 2])
+                            outRow[tx] = UInt8(truncatingIfNeeded: (r &* 30 &+ g &* 59 &+ b &* 11) / 100)
+                        }
+                    }
+                }
             }
         }
-        return out
     }
 }
