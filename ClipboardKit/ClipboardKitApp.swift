@@ -29,6 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var previousApp: NSRunningApplication?
     var hotKeyRef: EventHotKeyRef?
     var screenshotHotKeyRef: EventHotKeyRef?
+    var longScreenshotHotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -64,12 +65,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let ref = screenshotHotKeyRef {
             UnregisterEventHotKey(ref)
         }
+        if let ref = longScreenshotHotKeyRef {
+            UnregisterEventHotKey(ref)
+        }
     }
 
     @objc func togglePopover() {
         if let button = statusItem.button {
             if popover.isShown {
                 popover.performClose(nil)
+                ImageQuickPreview.shared.dismiss()
             } else {
                 // Lazily create content to avoid layout recursion at launch
                 if popover.contentViewController == nil {
@@ -89,6 +94,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func closePopoverAndRestoreFocus(then action: @escaping () -> Void) {
         popover.performClose(nil)
+        ImageQuickPreview.shared.dismiss()
         // Re-activate the previous app so paste goes into the right place
         if let app = previousApp {
             app.activate()
@@ -147,6 +153,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     AppDelegate.shared?.togglePopover()
                 case 2:
                     AppDelegate.shared?.captureScreenRegion()
+                case 3:
+                    AppDelegate.shared?.toggleLongScreenshot()
                 default:
                     break
                 }
@@ -172,15 +180,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("Global hotkey Cmd+Shift+V registered successfully")
         }
 
-        // Register Cmd+Option+S — interactive screen region snapshot to clipboard
+        // Register Cmd+Shift+S — interactive screen region snapshot to clipboard
         let snapHotkeyID = EventHotKeyID(signature: signature, id: 2)
-        let snapModifiers: UInt32 = UInt32(cmdKey | optionKey)
+        let snapModifiers: UInt32 = UInt32(cmdKey | shiftKey)
         let snapStatus = RegisterEventHotKey(UInt32(kVK_ANSI_S), snapModifiers, snapHotkeyID,
                                              GetApplicationEventTarget(), 0, &screenshotHotKeyRef)
         if snapStatus != noErr {
-            print("Failed to register Cmd+Option+S hotkey: \(snapStatus)")
+            print("Failed to register Cmd+Shift+S hotkey: \(snapStatus)")
         } else {
-            print("Global hotkey Cmd+Option+S registered successfully")
+            print("Global hotkey Cmd+Shift+S registered successfully")
+        }
+
+        // Register Cmd+Shift+L — long (scrolling) screenshot. Pressing again stops & commits.
+        let longHotkeyID = EventHotKeyID(signature: signature, id: 3)
+        let longModifiers: UInt32 = UInt32(cmdKey | shiftKey)
+        let longStatus = RegisterEventHotKey(UInt32(kVK_ANSI_L), longModifiers, longHotkeyID,
+                                             GetApplicationEventTarget(), 0, &longScreenshotHotKeyRef)
+        if longStatus != noErr {
+            print("Failed to register Cmd+Shift+L hotkey: \(longStatus)")
+        } else {
+            print("Global hotkey Cmd+Shift+L registered successfully")
         }
     }
 
@@ -191,5 +210,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Don't preflight — `CGPreflightScreenCaptureAccess` lies for ScreenCaptureKit
         // clients. Just begin; ScreenshotCapture surfaces auth failures itself.
         ScreenshotCapture.shared.begin()
+    }
+
+    /// Toggle the long-screenshot session: first press starts selection, second
+    /// press stops capturing and copies the stitched PNG to the clipboard.
+    func toggleLongScreenshot() {
+        LongScreenshotCapture.shared.toggle()
     }
 }

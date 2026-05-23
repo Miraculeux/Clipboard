@@ -35,7 +35,14 @@ final class ScreenshotCapture {
         isActive = true
 
         overlayWindows = NSScreen.screens.map { screen in
-            SelectionWindow(screen: screen, coordinator: self)
+            let w = SelectionWindow(screen: screen)
+            w.onFinish = { [weak self] rect, screen in
+                self?.finish(with: rect, on: screen)
+            }
+            w.onCancel = { [weak self] in
+                self?.cancel()
+            }
+            return w
         }
         overlayWindows.forEach { $0.orderFrontRegardless() }
 
@@ -134,13 +141,15 @@ final class ScreenshotCapture {
 
 // MARK: - Overlay window
 
-private final class SelectionWindow: NSWindow {
-    weak var coordinator: ScreenshotCapture?
+/// Borderless full-screen overlay used to drag-select a rectangle.
+/// Generic over its caller — invoke `onFinish` / `onCancel` to react.
+final class SelectionWindow: NSWindow {
     let targetScreen: NSScreen
+    var onFinish: ((NSRect, NSScreen) -> Void)?
+    var onCancel: (() -> Void)?
 
-    init(screen: NSScreen, coordinator: ScreenshotCapture) {
+    init(screen: NSScreen) {
         self.targetScreen = screen
-        self.coordinator = coordinator
         super.init(
             contentRect: screen.frame,
             styleMask: .borderless,
@@ -168,14 +177,14 @@ private final class SelectionWindow: NSWindow {
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // ESC
-            coordinator?.cancel()
+            onCancel?()
             return
         }
         super.keyDown(with: event)
     }
 }
 
-private final class SelectionView: NSView {
+final class SelectionView: NSView {
     weak var host: SelectionWindow?
 
     private var startPoint: NSPoint?
@@ -231,9 +240,9 @@ private final class SelectionView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        guard let host = host, let coordinator = host.coordinator else { return }
+        guard let host = host else { return }
         guard let rect = currentRect, rect.width >= 2, rect.height >= 2 else {
-            coordinator.cancel()
+            host.onCancel?()
             return
         }
         // Convert from view coordinates to global AppKit screen coordinates.
@@ -244,7 +253,7 @@ private final class SelectionView: NSView {
             width: rect.width,
             height: rect.height
         )
-        coordinator.finish(with: screenRect, on: host.targetScreen)
+        host.onFinish?(screenRect, host.targetScreen)
     }
 
     override func draw(_ dirtyRect: NSRect) {

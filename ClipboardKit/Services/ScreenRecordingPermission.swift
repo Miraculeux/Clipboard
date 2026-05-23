@@ -24,7 +24,7 @@ enum ScreenRecordingPermission {
         alert.messageText = "Screen Recording permission required"
         alert.informativeText = """
         ClipboardKit needs Screen Recording access to capture screenshots with \
-        Cmd+Option+S. Enable it in System Settings → Privacy & Security → \
+        Cmd+Shift+S. Enable it in System Settings → Privacy & Security → \
         Screen Recording, then quit and relaunch ClipboardKit.
         """
         alert.alertStyle = .warning

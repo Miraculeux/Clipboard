@@ -205,7 +205,15 @@ struct ClipboardItemRow: View, Equatable {
             // Action buttons — always present so hover/click hit-testing
             // stays stable; only the visibility flips on hover.
             HStack(spacing: 6) {
-                if item.contentType == .image {
+                if item.contentType == .image, let fileName = item.fileName {
+                    Button(action: { Self.togglePreview(path: fileName) }) {
+                        Image(systemName: "eye")
+                            .font(.system(size: 12, weight: .regular))
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Quick Look")
+
                     Button(action: { Self.saveImageAs(item) }) {
                         Image(systemName: "square.and.arrow.down")
                             .font(.system(size: 12, weight: .regular))
@@ -308,6 +316,10 @@ struct ClipboardItemRow: View, Equatable {
 
     /// Static so the action button doesn't need to capture parent state.
     /// Self-contained: derives everything it needs from `item`.
+    fileprivate static func togglePreview(path: String) {
+        ImageQuickPreview.shared.toggle(path: path)
+    }
+
     fileprivate static func saveImageAs(_ item: ClipboardItem) {
         guard item.contentType == .image, let sourcePath = item.fileName else { return }
         let sourceURL = URL(fileURLWithPath: sourcePath)

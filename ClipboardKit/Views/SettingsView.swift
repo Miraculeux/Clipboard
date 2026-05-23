@@ -89,7 +89,7 @@ struct SettingsView: View {
                             .font(.callout)
                     }
                     HStack(spacing: 8) {
-                        Text("⌘⌥S")
+                        Text("⌘⇧S")
                             .font(.system(size: 13, weight: .medium, design: .rounded))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -100,6 +100,21 @@ struct SettingsView: View {
                                     .stroke(Color(NSColor.separatorColor), lineWidth: 1)
                             )
                         Text("Capture screen region to clipboard")
+                            .foregroundStyle(.secondary)
+                            .font(.callout)
+                    }
+                    HStack(spacing: 8) {
+                        Text("⌘⇧L")
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color(NSColor.controlBackgroundColor))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+                            )
+                        Text("Long screenshot — scroll to capture, press again to finish")
                             .foregroundStyle(.secondary)
                             .font(.callout)
                     }
