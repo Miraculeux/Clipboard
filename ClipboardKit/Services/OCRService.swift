@@ -24,63 +24,46 @@ enum OCRService {
         }
     }
 
-    /// Languages we ask Vision to consider. The system will still
-    /// auto-detect when `automaticallyDetectsLanguage` is enabled (macOS 13+),
-    /// but providing hints biases the model toward better results for mixed
-    /// Chinese / English content, which is the common case for users of this
-    /// app.
-    private static let preferredLanguages: [String] = ["zh-Hans", "zh-Hant", "en-US"]
+    /// Languages we ask Vision to consider, in priority order. We deliberately
+    /// disable `automaticallyDetectsLanguage` (see below) because on macOS 13+
+    /// turning it on causes Vision to *ignore* this list and pick a single
+    /// language, which produces terrible results on the common case here —
+    /// screenshots that mix Simplified Chinese and English.
+    private static let preferredLanguages: [String] = [
+        "zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"
+    ]
 
     /// Recognize all text in `image`, returning the joined lines (top-to-bottom)
     /// or an error. `completion` is invoked on the main queue.
     static func recognizeText(in image: NSImage,
                               completion: @Sendable @escaping (Result<String, OCRError>) -> Void) {
+        // Pull the highest-resolution CGImage we can. `cgImage(forProposedRect:)`
+        // returns the best available bitmap representation for screenshots
+        // loaded from disk or pasteboard, at native pixel size.
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            // Fallback: rasterize through TIFFRepresentation in case the image
+            // is a vector / wrapped representation that doesn't expose a CGImage
+            // directly.
+            if let tiff = image.tiffRepresentation,
+               let src = CGImageSourceCreateWithData(tiff as CFData, nil),
+               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) {
+                recognize(cgImage: cg, orientation: .up, completion: completion)
+                return
+            }
             DispatchQueue.main.async { completion(.failure(.invalidImage)) }
             return
         }
-        recognize(cgImage: cgImage, completion: completion)
+        recognize(cgImage: cgImage, orientation: .up, completion: completion)
     }
 
     /// Recognize all text in the PNG/JPEG at `url`. `completion` is on main.
+    /// Uses Vision's URL-based handler so EXIF orientation metadata is honored
+    /// without us having to interpret it manually.
     static func recognizeText(at url: URL,
                               completion: @Sendable @escaping (Result<String, OCRError>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let image = NSImage(contentsOf: url),
-                  let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-                DispatchQueue.main.async { completion(.failure(.invalidImage)) }
-                return
-            }
-            recognize(cgImage: cgImage, completion: completion)
-        }
-    }
-
-    private static func recognize(cgImage: CGImage,
-                                  completion: @Sendable @escaping (Result<String, OCRError>) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let request = VNRecognizeTextRequest { request, error in
-                if let error = error {
-                    let msg = error.localizedDescription
-                    DispatchQueue.main.async { completion(.failure(.visionFailed(msg))) }
-                    return
-                }
-                let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
-                let lines = observations.compactMap { $0.topCandidates(1).first?.string }
-                if lines.isEmpty {
-                    DispatchQueue.main.async { completion(.failure(.noTextFound)) }
-                } else {
-                    let joined = lines.joined(separator: "\n")
-                    DispatchQueue.main.async { completion(.success(joined)) }
-                }
-            }
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-            request.recognitionLanguages = preferredLanguages
-            if #available(macOS 13.0, *) {
-                request.automaticallyDetectsLanguage = true
-            }
-
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            let request = makeTextRequest(completion: completion)
+            let handler = VNImageRequestHandler(url: url, options: [:])
             do {
                 try handler.perform([request])
             } catch {
@@ -88,6 +71,70 @@ enum OCRService {
                 DispatchQueue.main.async { completion(.failure(.visionFailed(msg))) }
             }
         }
+    }
+
+    private static func recognize(cgImage: CGImage,
+                                  orientation: CGImagePropertyOrientation,
+                                  completion: @Sendable @escaping (Result<String, OCRError>) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let request = makeTextRequest(completion: completion)
+            let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+            do {
+                try handler.perform([request])
+            } catch {
+                let msg = error.localizedDescription
+                DispatchQueue.main.async { completion(.failure(.visionFailed(msg))) }
+            }
+        }
+    }
+
+    /// Build a single configured `VNRecognizeTextRequest`. Centralized so the
+    /// URL-based and CGImage-based entry points use the *exact same* tuning.
+    private static func makeTextRequest(
+        completion: @Sendable @escaping (Result<String, OCRError>) -> Void
+    ) -> VNRecognizeTextRequest {
+        let request = VNRecognizeTextRequest { request, error in
+            if let error = error {
+                let msg = error.localizedDescription
+                DispatchQueue.main.async { completion(.failure(.visionFailed(msg))) }
+                return
+            }
+            let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
+
+            // Vision returns observations in an internal order that's roughly
+            // reading order for simple layouts but scrambles on multi-column
+            // screenshots. Re-sort top→bottom, left→right using bounding-box
+            // centers. Y is in normalized image coords (origin bottom-left).
+            let lineTolerance: CGFloat = 0.012
+            let sorted = observations.sorted { lhs, rhs in
+                let dy = lhs.boundingBox.midY - rhs.boundingBox.midY
+                if abs(dy) > lineTolerance { return dy > 0 } // higher = earlier
+                return lhs.boundingBox.minX < rhs.boundingBox.minX
+            }
+            let lines = sorted.compactMap { $0.topCandidates(1).first?.string }
+            if lines.isEmpty {
+                DispatchQueue.main.async { completion(.failure(.noTextFound)) }
+            } else {
+                let joined = lines.joined(separator: "\n")
+                DispatchQueue.main.async { completion(.success(joined)) }
+            }
+        }
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.recognitionLanguages = preferredLanguages
+        // CRITICAL: on macOS 13+ this defaults to `true`, which silently
+        // ignores `recognitionLanguages` and lets Vision pick a single
+        // language. For mixed CN/EN screenshots that almost always loses
+        // one side of the text. Force it off so our priority list wins.
+        if #available(macOS 13.0, *) {
+            request.automaticallyDetectsLanguage = false
+        }
+        // Pin to the newest available revision so we get the latest Chinese
+        // training data instead of whatever the historical default is.
+        request.revision = VNRecognizeTextRequest.currentRevision
+        // Don't filter small text — UI screenshots often have 11–13pt labels.
+        request.minimumTextHeight = 0
+        return request
     }
 }
 
