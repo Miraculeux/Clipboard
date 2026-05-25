@@ -19,6 +19,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let showCaptureThumbnail = "showCaptureThumbnail"
         static let hasSeenOnboarding = "hasSeenOnboarding"
         static let alwaysPastePlainText = "alwaysPastePlainText"
+        static let restoreClipboardAfterPaste = "restoreClipboardAfterPaste"
         static func hotkeyKeyCode(_ action: HotkeyAction) -> String { "hotkey.\(action.rawValue).keyCode" }
         static func hotkeyModifiers(_ action: HotkeyAction) -> String { "hotkey.\(action.rawValue).modifiers" }
     }
@@ -85,6 +86,14 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         didSet { defaults.set(alwaysPastePlainText, forKey: Keys.alwaysPastePlainText) }
     }
 
+    /// When on, ClipboardKit snapshots the system pasteboard before pasting a
+    /// history item, then restores the original contents ~250ms after the
+    /// simulated ⌘V. Net effect: the user pastes from history without
+    /// losing whatever they had on the clipboard before.
+    @Published var restoreClipboardAfterPaste: Bool {
+        didSet { defaults.set(restoreClipboardAfterPaste, forKey: Keys.restoreClipboardAfterPaste) }
+    }
+
     var largeFileThresholdBytes: Int {
         largeFileThresholdMB * 1_000_000
     }
@@ -126,6 +135,9 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         if defaults.object(forKey: Keys.alwaysPastePlainText) == nil {
             defaults.set(false, forKey: Keys.alwaysPastePlainText)
         }
+        if defaults.object(forKey: Keys.restoreClipboardAfterPaste) == nil {
+            defaults.set(false, forKey: Keys.restoreClipboardAfterPaste)
+        }
 
         self.maxHistoryCount = defaults.integer(forKey: Keys.maxHistoryCount)
         self.largeFileStoragePath = defaults.string(forKey: Keys.largeFileStoragePath) ?? defaultStoragePath
@@ -138,6 +150,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         self.showCaptureThumbnail = defaults.bool(forKey: Keys.showCaptureThumbnail)
         self.hasSeenOnboarding = defaults.bool(forKey: Keys.hasSeenOnboarding)
         self.alwaysPastePlainText = defaults.bool(forKey: Keys.alwaysPastePlainText)
+        self.restoreClipboardAfterPaste = defaults.bool(forKey: Keys.restoreClipboardAfterPaste)
 
         // Ensure storage directory exists
         ensureStorageDirectoryExists()

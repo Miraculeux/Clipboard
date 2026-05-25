@@ -119,6 +119,7 @@ private final class AnnotationViewController: NSViewController {
 
     private var toolButtons: [AnnotationTool: NSButton] = [:]
     private var colorButtons: [ColorSwatchButton] = []
+    private weak var customColorWell: NSColorWell?
 
     init(image: NSImage, canvasSize: NSSize) {
         self.image = image
@@ -204,6 +205,22 @@ private final class AnnotationViewController: NSViewController {
             colorButtons.append(btn)
             toolsStack.addArrangedSubview(btn)
         }
+
+        // Custom color picker — opens the system color panel so users can
+        // pick any hue / pull eyedropper from the screen, in addition to the
+        // preset swatches above.
+        let well = NSColorWell()
+        well.color = currentColor
+        well.target = self
+        well.action = #selector(colorWellChanged(_:))
+        well.translatesAutoresizingMaskIntoConstraints = false
+        well.toolTip = "Custom color…"
+        NSLayoutConstraint.activate([
+            well.widthAnchor.constraint(equalToConstant: 26),
+            well.heightAnchor.constraint(equalToConstant: 22)
+        ])
+        customColorWell = well
+        toolsStack.addArrangedSubview(well)
 
         toolsStack.addArrangedSubview(verticalDivider())
 
@@ -326,6 +343,16 @@ private final class AnnotationViewController: NSViewController {
 
     @objc private func colorTapped(_ sender: ColorSwatchButton) {
         currentColor = sender.color
+        updateColorSelection()
+        // Reflect the chosen swatch in the color well too so the user has a
+        // single source of truth for the current color.
+        customColorWell?.color = sender.color
+    }
+
+    @objc private func colorWellChanged(_ sender: NSColorWell) {
+        currentColor = sender.color
+        // Any preset that happens to match exactly still highlights;
+        // otherwise no swatch shows the selected state.
         updateColorSelection()
     }
 

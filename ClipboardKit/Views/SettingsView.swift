@@ -72,6 +72,11 @@ struct SettingsView: View {
                             .frame(width: 120, alignment: .trailing)
                         Toggle("Always paste as plain text (strip formatting)", isOn: $settings.alwaysPastePlainText)
                     }
+                    GridRow {
+                        Text("")
+                            .frame(width: 120, alignment: .trailing)
+                        Toggle("Restore previous clipboard after paste", isOn: $settings.restoreClipboardAfterPaste)
+                    }
                 }
                 .padding(8)
             }

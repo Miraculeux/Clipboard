@@ -32,14 +32,10 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
 
     private var filterCancellable: AnyCancellable?
 
-    /// Cached history file URL. Directory is created once in `init` so we
-    /// don't hit the filesystem on every save.
-    private let historyFileURL: URL = {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("ClipboardKit")
-        try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
-        return appDir.appendingPathComponent("history.json")
-    }()
+    /// SQLite-backed history persistence. Replaces the previous
+    /// `history.json` blob. Reads/writes happen on the store's internal
+    /// queue; we just hand it snapshots.
+    private let store = HistoryStore.shared
 
     private init() {
         lastChangeCount = pasteboard.changeCount
@@ -348,6 +344,13 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
 
     func pasteItem(_ item: ClipboardItem, asPlainText: Bool = false) {
         let forcePlain = asPlainText || settings.alwaysPastePlainText
+        // Snapshot what the user had on the clipboard BEFORE we overwrite it
+        // with our own payload. If `restoreClipboardAfterPaste` is on we put
+        // these contents back after the simulated paste, so the user's
+        // previous clipboard survives. Captured once here so every async
+        // branch below ends up restoring the same baseline.
+        let restoreSnapshot: PasteboardSnapshot? =
+            settings.restoreClipboardAfterPaste ? snapshotPasteboard() : nil
 
         // Image paste: read large data off the main thread to avoid UI hitches.
         if item.contentType == .image, let fileName = item.fileName {
@@ -360,7 +363,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                         self.pasteboard.clearContents()
                         self.pasteboard.setData(data, forType: .png)
                     }
-                    self.finalizePasteAndSimulate()
+                    self.finalizePasteAndSimulate(restore: restoreSnapshot)
                 }
             }
             return
@@ -384,7 +387,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                             self.pasteboard.setData(rtfData, forType: .rtf)
                             self.pasteboard.setString(plain, forType: .string)
                         }
-                        self.finalizePasteAndSimulate()
+                        self.finalizePasteAndSimulate(restore: restoreSnapshot)
                     }
                     return
                 }
@@ -394,7 +397,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                 DispatchQueue.main.async {
                     self.pasteboard.clearContents()
                     self.pasteboard.setString(plain, forType: .string)
-                    self.finalizePasteAndSimulate()
+                    self.finalizePasteAndSimulate(restore: restoreSnapshot)
                 }
             }
             return
@@ -409,7 +412,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                     guard let self = self else { return }
                     self.pasteboard.clearContents()
                     self.pasteboard.setString(fullText, forType: .string)
-                    self.finalizePasteAndSimulate()
+                    self.finalizePasteAndSimulate(restore: restoreSnapshot)
                 }
             }
             return
@@ -433,13 +436,23 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             }
         }
 
-        finalizePasteAndSimulate()
+        finalizePasteAndSimulate(restore: restoreSnapshot)
     }
 
-    private func finalizePasteAndSimulate() {
+    private func finalizePasteAndSimulate(restore: PasteboardSnapshot? = nil) {
         lastChangeCount = pasteboard.changeCount
         AppDelegate.shared.closePopoverAndRestoreFocus { [weak self] in
             self?.simulatePaste()
+            // Restore the snapshotted clipboard after a brief delay — long
+            // enough for the receiving app to actually consume the paste
+            // event. Without the delay, some apps (e.g. Slack web) read the
+            // pasteboard from a deferred handler and end up with the restored
+            // baseline instead of our payload.
+            if let snap = restore {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    self?.restorePasteboard(snap)
+                }
+            }
         }
     }
 
@@ -454,6 +467,51 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
 
         keyDown?.post(tap: CGEventTapLocation.cghidEventTap)
         keyUp?.post(tap: CGEventTapLocation.cghidEventTap)
+    }
+
+    // MARK: - Pasteboard snapshot / restore
+
+    /// Full-fidelity copy of every item on `NSPasteboard.general`. We capture
+    /// the raw `Data` for every declared type so we can reproduce the same
+    /// content (images, file URLs, RTF, custom flavors, …) bit-for-bit when
+    /// restoring after a paste.
+    struct PasteboardSnapshot {
+        let entries: [[NSPasteboard.PasteboardType: Data]]
+    }
+
+    private func snapshotPasteboard() -> PasteboardSnapshot? {
+        guard let items = pasteboard.pasteboardItems else { return nil }
+        var entries: [[NSPasteboard.PasteboardType: Data]] = []
+        entries.reserveCapacity(items.count)
+        for item in items {
+            var map: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    map[type] = data
+                }
+            }
+            if !map.isEmpty { entries.append(map) }
+        }
+        return entries.isEmpty ? nil : PasteboardSnapshot(entries: entries)
+    }
+
+    private func restorePasteboard(_ snapshot: PasteboardSnapshot) {
+        pasteboard.clearContents()
+        var items: [NSPasteboardItem] = []
+        items.reserveCapacity(snapshot.entries.count)
+        for map in snapshot.entries {
+            let pbItem = NSPasteboardItem()
+            for (type, data) in map {
+                pbItem.setData(data, forType: type)
+            }
+            items.append(pbItem)
+        }
+        if !items.isEmpty {
+            pasteboard.writeObjects(items)
+        }
+        // Bump our high-water mark so the monitor doesn't treat the restore
+        // as a fresh user-driven copy and re-ingest it.
+        lastChangeCount = pasteboard.changeCount
     }
 
     func deleteItem(_ item: ClipboardItem) {
@@ -502,15 +560,13 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
 
     /// Coalesce many rapid mutations into a single background write.
     /// Snapshot the array on the main thread (cheap COW reference); the
-    /// background work item just encodes + writes that snapshot. We avoid
-    /// `DispatchQueue.main.sync` from the save queue to prevent any chance of
-    /// reverse-blocking the main thread.
+    /// background work item just hands it to `HistoryStore`, which does the
+    /// SQLite write in a single transaction.
     private func scheduleSave() {
         pendingSave?.cancel()
         let snapshot = history
-        let url = historyFileURL
-        let work = DispatchWorkItem {
-            Self.writeHistory(snapshot, to: url)
+        let work = DispatchWorkItem { [store] in
+            store.replaceAll(snapshot)
         }
         pendingSave = work
         saveQueue.asyncAfter(deadline: .now() + Self.saveDebounce, execute: work)
@@ -518,36 +574,27 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
 
     /// Force any pending write to complete synchronously (e.g. on terminate).
     /// Runs the write on the save queue so we don't tie up the main thread
-    /// with a JSON encode + atomic file write — and we serialize cleanly
-    /// against any in-flight save the queue had already started.
+    /// with the SQLite work and we serialize cleanly against any in-flight
+    /// save the queue had already started.
     private func flushPendingSave() {
         pendingSave?.cancel()
         pendingSave = nil
         let snapshot = history
-        let url = historyFileURL
-        saveQueue.sync {
-            Self.writeHistory(snapshot, to: url)
-        }
-    }
-
-    private static func writeHistory(_ items: [ClipboardItem], to url: URL) {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        if let data = try? encoder.encode(items) {
-            try? data.write(to: url, options: .atomic)
+        saveQueue.sync { [store] in
+            store.replaceAll(snapshot)
         }
     }
 
     private func loadHistoryAsync() {
-        let url = historyFileURL
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard FileManager.default.fileExists(atPath: url.path) else { return }
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            guard let data = try? Data(contentsOf: url),
-                  let items = try? decoder.decode([ClipboardItem].self, from: data) else { return }
+            guard let self = self else { return }
+            // One-time migration from the old history.json into SQLite, if
+            // present. The store hands us back the imported items so we can
+            // populate memory directly without a second read.
+            let imported = self.store.migrateLegacyJSONIfNeeded()
+            let items = imported ?? self.store.loadAll()
+            guard !items.isEmpty else { return }
             DispatchQueue.main.async {
-                guard let self = self else { return }
                 if self.history.isEmpty {
                     self.history = items
                 } else {
