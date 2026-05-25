@@ -236,6 +236,10 @@ private final class AnnotationViewController: NSViewController {
         redoBtn.keyEquivalentModifierMask = [.command, .shift]
         actionsStack.addArrangedSubview(undoBtn)
         actionsStack.addArrangedSubview(redoBtn)
+        let ocrBtn = Self.makeActionButton(symbol: "text.viewfinder",
+                                           label: "Recognize Text",
+                                           target: self,
+                                           action: #selector(recognizeText))
         let copyBtn = Self.makeActionButton(symbol: "doc.on.doc",
                                             label: "Copy to Clipboard (↩)",
                                             target: self,
@@ -246,6 +250,7 @@ private final class AnnotationViewController: NSViewController {
                                             label: "Save…",
                                             target: self,
                                             action: #selector(saveAs))
+        actionsStack.addArrangedSubview(ocrBtn)
         actionsStack.addArrangedSubview(copyBtn)
         actionsStack.addArrangedSubview(saveBtn)
         actionsStack.addArrangedSubview(NSView()) // tail spacer so the row stays left-aligned
@@ -351,6 +356,27 @@ private final class AnnotationViewController: NSViewController {
         guard let data = canvas.flattenedPNG() else { NSSound.beep(); return }
         CaptureOutput.shared.deliver(pngData: data, showThumbnail: false)
         view.window?.close()
+    }
+
+    @objc private func recognizeText() {
+        guard let baked = canvas.bakedImage() else { NSSound.beep(); return }
+        let anchor = view.window
+        OCRService.recognizeText(in: baked) { result in
+            switch result {
+            case .success(let text):
+                OCRResultWindowController.present(recognizedText: text, anchor: anchor)
+            case .failure(let error):
+                let alert = NSAlert()
+                alert.messageText = "No text recognized"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .informational
+                if let win = anchor {
+                    alert.beginSheetModal(for: win, completionHandler: nil)
+                } else {
+                    alert.runModal()
+                }
+            }
+        }
     }
 
     @objc private func saveAs() {

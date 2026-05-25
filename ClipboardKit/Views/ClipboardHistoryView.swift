@@ -326,6 +326,7 @@ struct ClipboardItemRow: View, Equatable {
             if item.contentType == .image, let fileName = item.fileName {
                 Divider()
                 Button("Annotate…") { Self.openAnnotator(path: fileName) }
+                Button("Recognize Text (OCR)") { Self.recognizeText(path: fileName) }
                 Button("Quick Look") { Self.togglePreview(path: fileName) }
                 Button("Save to…") { Self.saveImageAs(item) }
             }
@@ -448,6 +449,30 @@ struct ClipboardItemRow: View, Equatable {
         // down the popover before we order the annotator front.
         DispatchQueue.main.async {
             AnnotationWindowController.shared.present(image: image)
+        }
+    }
+
+    /// Run OCR on the image at `path` and show the recognized text in a
+    /// floating panel. Closes the popover first so the result panel can
+    /// receive focus.
+    fileprivate static func recognizeText(path: String) {
+        let url = URL(fileURLWithPath: path)
+        AppDelegate.shared?.popover.close()
+        ImageQuickPreview.shared.dismiss()
+        DispatchQueue.main.async {
+            OCRService.recognizeText(at: url) { result in
+                switch result {
+                case .success(let text):
+                    OCRResultWindowController.present(recognizedText: text)
+                case .failure(let error):
+                    let alert = NSAlert()
+                    alert.messageText = "No text recognized"
+                    alert.informativeText = error.localizedDescription
+                    alert.alertStyle = .informational
+                    NSApp.activate()
+                    alert.runModal()
+                }
+            }
         }
     }
 
