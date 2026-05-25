@@ -72,12 +72,18 @@ final class ScreenshotCapture: @unchecked Sendable {
             config.capturesAudio = false
             config.scalesToFit = false
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            // Leave `bitmap.size` at its default (= cgImage pixel dimensions).
+            // Overriding it to point size made the PNG encoder embed a pHYs
+            // chunk that several viewers interpret as "this image is meant to
+            // be shown at half resolution", which is what the user was seeing.
             let bitmap = NSBitmapImageRep(cgImage: cgImage)
-            bitmap.size = screen.frame.size
             guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
                 NSSound.beep()
                 return
             }
+            // NSImage display size stays in points so the annotator renders
+            // at natural on-screen size; the underlying CGImage carries the
+            // full Retina pixel data either way.
             let image = NSImage(cgImage: cgImage, size: screen.frame.size)
             CaptureOutput.shared.deliver(pngData: pngData, image: image)
         } catch {
@@ -200,8 +206,11 @@ final class ScreenshotCapture: @unchecked Sendable {
             // Skip TIFF: it's uncompressed (~30+ MB for a 4K capture), forces a
             // second encode pass here, and then ClipboardManager would re-decode
             // it to derive PNG anyway. Modern macOS consumers handle PNG fine.
+            //
+            // Important: DON'T set `bitmap.size = screenRect.size`. That would
+            // force the encoder to write a low-DPI pHYs chunk, and many viewers
+            // then render the file at half its actual pixel size.
             let bitmap = NSBitmapImageRep(cgImage: cgImage)
-            bitmap.size = screenRect.size
             guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
                 print("Screenshot: failed to encode image data")
                 NSSound.beep()
@@ -253,8 +262,10 @@ final class ScreenshotCapture: @unchecked Sendable {
 
             let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
 
+            // See the full-screen path above: keep `bitmap.size` at its
+            // pixel-dimension default so the PNG file isn't tagged with a
+            // half-resolution pHYs hint.
             let bitmap = NSBitmapImageRep(cgImage: cgImage)
-            bitmap.size = NSSize(width: contentRect.width, height: contentRect.height)
             guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
                 NSSound.beep()
                 return
