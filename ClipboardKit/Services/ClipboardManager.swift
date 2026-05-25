@@ -313,8 +313,17 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
 
             // Remove duplicate. Short-circuit on `originalSize` (cheap Int compare)
             // before doing the potentially expensive String/Array equality.
+            // Pinned duplicates are preserved (the user explicitly wanted them
+            // around) — we just won't add a second copy below.
             if item.contentType == .fileURL, let paths = item.filePaths {
                 let count = paths.count
+                if let existing = self.history.first(where: {
+                    $0.contentType == .fileURL
+                        && ($0.filePaths?.count ?? -1) == count
+                        && $0.filePaths == paths
+                }), existing.isPinned {
+                    return
+                }
                 self.history.removeAll {
                     $0.contentType == .fileURL
                         && ($0.filePaths?.count ?? -1) == count
@@ -323,6 +332,13 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             } else if let text = item.textContent {
                 let size = item.originalSize
                 let type = item.contentType
+                if let existing = self.history.first(where: {
+                    $0.contentType == type
+                        && $0.originalSize == size
+                        && $0.textContent == text
+                }), existing.isPinned {
+                    return
+                }
                 self.history.removeAll {
                     $0.contentType == type
                         && $0.originalSize == size
@@ -330,12 +346,26 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                 }
             }
 
-            self.history.insert(item, at: 0)
+            // Insert the fresh item right below the pinned section so pins
+            // stay at the very top of the list.
+            let pinnedCount = self.history.prefix(while: { $0.isPinned }).count
+            self.history.insert(item, at: pinnedCount)
 
-            // Trim to max count
-            while self.history.count > self.settings.maxHistoryCount {
-                let removed = self.history.removeLast()
-                self.cleanupFile(for: removed)
+            // Trim to max count, but never evict pinned items. Pinned items
+            // also don't count toward the cap so users can stockpile
+            // long-lived snippets without losing fresh history.
+            let unpinnedCount = self.history.lazy.filter { !$0.isPinned }.count
+            var toRemove = max(0, unpinnedCount - self.settings.maxHistoryCount)
+            if toRemove > 0 {
+                var i = self.history.count - 1
+                while i >= 0 && toRemove > 0 {
+                    if !self.history[i].isPinned {
+                        let removed = self.history.remove(at: i)
+                        self.cleanupFile(for: removed)
+                        toRemove -= 1
+                    }
+                    i -= 1
+                }
             }
 
             self.scheduleSave()
@@ -532,13 +562,41 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         scheduleSave()
     }
 
-    func pinItem(_ item: ClipboardItem) {
-        // Move item to top
-        if let index = history.firstIndex(of: item) {
-            history.remove(at: index)
-            history.insert(item, at: 0)
-            scheduleSave()
+    /// Toggle the pinned state on `item`. Pinned items move to the top of
+    /// the list (in pin-toggle order), survive across launches, and are
+    /// exempt from the max-history trim. Unpinning drops the item to the top
+    /// of the unpinned section so the user can see what they just released.
+    func togglePin(_ item: ClipboardItem) {
+        guard let index = history.firstIndex(where: { $0.id == item.id }) else { return }
+        var updated = history[index]
+        updated.isPinned.toggle()
+        history.remove(at: index)
+        if updated.isPinned {
+            // Insert at the top of the pinned section so most-recently pinned
+            // bubbles up to the absolute top.
+            history.insert(updated, at: 0)
+        } else {
+            // Drop the now-unpinned item right after the pinned section.
+            let pinnedCount = history.prefix(while: { $0.isPinned }).count
+            history.insert(updated, at: pinnedCount)
         }
+        scheduleSave()
+    }
+
+    /// Legacy alias kept for callers that don't yet pass through the toggle.
+    /// Pins the item if it isn't already pinned, otherwise re-asserts its
+    /// position at the top of the pin section.
+    func pinItem(_ item: ClipboardItem) {
+        if let existing = history.first(where: { $0.id == item.id }), existing.isPinned {
+            // Already pinned — move to top of pin section.
+            if let idx = history.firstIndex(where: { $0.id == item.id }) {
+                let removed = history.remove(at: idx)
+                history.insert(removed, at: 0)
+                scheduleSave()
+            }
+            return
+        }
+        togglePin(item)
     }
 
     private func cleanupFile(for item: ClipboardItem) {

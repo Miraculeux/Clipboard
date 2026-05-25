@@ -199,7 +199,13 @@ struct ClipboardItemRow: View, Equatable {
     /// are intentionally excluded from the comparison — they're storage, not
     /// identity.
     static nonisolated func == (lhs: ClipboardItemRow, rhs: ClipboardItemRow) -> Bool {
-        lhs.item == rhs.item && lhs.isKeyboardSelected == rhs.isKeyboardSelected
+        // `ClipboardItem ==` compares by id only; that's correct for the
+        // history array (items are immutable except for `isPinned`). The Row
+        // also displays the pin indicator, so include it explicitly so a
+        // pin/unpin actually triggers a re-render of the visible row.
+        lhs.item == rhs.item
+            && lhs.item.isPinned == rhs.item.isPinned
+            && lhs.isKeyboardSelected == rhs.isKeyboardSelected
     }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
@@ -245,6 +251,12 @@ struct ClipboardItemRow: View, Equatable {
                 }
 
                 HStack {
+                    if item.isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.accentColor)
+                            .help("Pinned")
+                    }
                     Text(relativeTimestamp)
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -287,13 +299,14 @@ struct ClipboardItemRow: View, Equatable {
                     .help("Save to…")
                 }
 
-                Button(action: { manager.pinItem(item) }) {
-                    Image(systemName: "pin")
+                Button(action: { manager.togglePin(item) }) {
+                    Image(systemName: item.isPinned ? "pin.fill" : "pin")
                         .font(.system(size: 12, weight: .regular))
                         .frame(width: 16, height: 16)
+                        .foregroundColor(item.isPinned ? .accentColor : .primary)
                 }
                 .buttonStyle(.plain)
-                .help("Move to top")
+                .help(item.isPinned ? "Unpin" : "Pin to top")
 
                 Button(action: { manager.deleteItem(item) }) {
                     Image(systemName: "trash")
@@ -331,7 +344,7 @@ struct ClipboardItemRow: View, Equatable {
                 Button("Save to…") { Self.saveImageAs(item) }
             }
             Divider()
-            Button("Pin to top") { manager.pinItem(item) }
+            Button(item.isPinned ? "Unpin" : "Pin to top") { manager.togglePin(item) }
             Button("Delete", role: .destructive) { manager.deleteItem(item) }
         }
         .task(id: item.id) {
