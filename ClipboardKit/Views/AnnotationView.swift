@@ -386,9 +386,13 @@ private final class AnnotationViewController: NSViewController {
     }
 
     @objc private func recognizeText() {
-        guard let baked = canvas.bakedImage() else { NSSound.beep(); return }
+        // OCR uses the *un-annotated* source image at native pixel resolution.
+        // The baked image (a) is down-sampled to point size on Retina because
+        // `image.size` is in points and (b) has the user's rectangles / arrows
+        // drawn over the text, which actively confuses Vision.
+        guard let source = canvas.sourceImageAtNativePixels() else { NSSound.beep(); return }
         let anchor = view.window
-        OCRService.recognizeText(in: baked) { result in
+        OCRService.recognizeText(in: source) { result in
             switch result {
             case .success(let text):
                 OCRResultWindowController.present(recognizedText: text, anchor: anchor)
@@ -640,8 +644,63 @@ private final class AnnotationCanvasView: NSView {
         return out
     }
 
+    /// Returns the original (un-annotated) source image at its native pixel
+    /// resolution as a fresh `NSImage`. Used by OCR — annotations baked over
+    /// text confuse Vision, and `image.size` is in points on Retina, so we
+    /// can't just hand back `self.image` directly.
+    func sourceImageAtNativePixels() -> NSImage? {
+        let pixelSize = nativePixelSize()
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(pixelSize.width),
+            pixelsHigh: Int(pixelSize.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        rep.size = pixelSize
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.current = ctx
+        image.draw(in: NSRect(origin: .zero, size: pixelSize))
+        let out = NSImage(size: pixelSize)
+        out.addRepresentation(rep)
+        return out
+    }
+
+    /// Resolves the true pixel size of the underlying bitmap, ignoring NSImage's
+    /// point-based `size` property. Falls back to point size if no bitmap rep
+    /// is available (e.g. for vector images, which we don't actually use).
+    private func nativePixelSize() -> NSSize {
+        // `representations` is ordered "best last" for some image sources, so
+        // iterate and pick the rep with the largest pixel area.
+        var best: NSSize?
+        for rep in image.representations {
+            let w = rep.pixelsWide
+            let h = rep.pixelsHigh
+            // `pixelsWide == NSImageRepMatchesDevice` (-1) means the rep is
+            // resolution-independent; skip those.
+            guard w > 0, h > 0 else { continue }
+            let size = NSSize(width: w, height: h)
+            if let b = best {
+                if size.width * size.height > b.width * b.height { best = size }
+            } else {
+                best = size
+            }
+        }
+        return best ?? image.size
+    }
+
     private func makeFlattenedRep() -> NSBitmapImageRep? {
-        let pixelSize = image.size
+        // Use native pixel resolution, NOT `image.size` (which is points and
+        // halves resolution on Retina captures). This matters for OCR quality
+        // and for not blurring "Save as…" outputs.
+        let pixelSize = nativePixelSize()
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: Int(pixelSize.width),

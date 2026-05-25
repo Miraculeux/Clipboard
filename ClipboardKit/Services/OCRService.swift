@@ -1,6 +1,8 @@
 import Foundation
 import AppKit
 import Vision
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 /// Optical character recognition wrapper around `VNRecognizeTextRequest`.
 ///
@@ -47,30 +49,76 @@ enum OCRService {
             if let tiff = image.tiffRepresentation,
                let src = CGImageSourceCreateWithData(tiff as CFData, nil),
                let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) {
-                recognize(cgImage: cg, orientation: .up, completion: completion)
+                recognize(cgImage: preprocess(cg), orientation: .up, completion: completion)
                 return
             }
             DispatchQueue.main.async { completion(.failure(.invalidImage)) }
             return
         }
-        recognize(cgImage: cgImage, orientation: .up, completion: completion)
+        recognize(cgImage: preprocess(cgImage), orientation: .up, completion: completion)
     }
 
     /// Recognize all text in the PNG/JPEG at `url`. `completion` is on main.
-    /// Uses Vision's URL-based handler so EXIF orientation metadata is honored
-    /// without us having to interpret it manually.
+    /// Loads via `CGImageSource` so we can honor EXIF orientation, then runs
+    /// the same preprocessing as the in-memory path.
     static func recognizeText(at url: URL,
                               completion: @Sendable @escaping (Result<String, OCRError>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let request = makeTextRequest(completion: completion)
-            let handler = VNImageRequestHandler(url: url, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                let msg = error.localizedDescription
-                DispatchQueue.main.async { completion(.failure(.visionFailed(msg))) }
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+                DispatchQueue.main.async { completion(.failure(.invalidImage)) }
+                return
+            }
+            let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+            let raw = (props?[kCGImagePropertyOrientation] as? UInt32) ?? 1
+            let orientation = CGImagePropertyOrientation(rawValue: raw) ?? .up
+            // `preprocess` bakes the orientation into the returned CGImage so
+            // by the time it reaches Vision the image is already upright.
+            let processed = preprocess(cg, orientation: orientation)
+            recognize(cgImage: processed, orientation: .up, completion: completion)
+        }
+    }
+
+    /// Cached CI context. CIContext is expensive to construct; reusing one
+    /// across OCR calls is the documented Apple recommendation.
+    private static let ciContext: CIContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    /// Image preprocessing that materially improves Vision's accuracy on
+    /// small / low-contrast screenshots:
+    ///   • Bakes EXIF orientation so observations come back in screen space.
+    ///   • Upscales to a minimum short-side of 1600 px via Lanczos (Vision
+    ///     starts struggling on text smaller than ~14 px tall; doubling
+    ///     resolution effectively doubles glyph height).
+    ///   • Slight contrast bump (×1.10) — helps with low-contrast UI text
+    ///     like greyed-out labels or dark-on-dark dropdowns.
+    /// If the source is already large enough we still bake orientation but
+    /// skip resampling.
+    private static func preprocess(_ cg: CGImage,
+                                   orientation: CGImagePropertyOrientation = .up) -> CGImage {
+        var ci = CIImage(cgImage: cg).oriented(orientation)
+        let extent = ci.extent
+        let shortSide = min(extent.width, extent.height)
+        let targetShortSide: CGFloat = 1600
+        if shortSide > 0 && shortSide < targetShortSide {
+            let scale = targetShortSide / shortSide
+            if let scaler = CIFilter(name: "CILanczosScaleTransform") {
+                scaler.setValue(ci, forKey: kCIInputImageKey)
+                scaler.setValue(scale, forKey: kCIInputScaleKey)
+                scaler.setValue(1.0, forKey: kCIInputAspectRatioKey)
+                if let out = scaler.outputImage {
+                    ci = out
+                }
             }
         }
+        let contrast = CIFilter.colorControls()
+        contrast.inputImage = ci
+        contrast.contrast = 1.10
+        contrast.saturation = 1.0
+        contrast.brightness = 0
+        if let out = contrast.outputImage {
+            ci = out
+        }
+        return ciContext.createCGImage(ci, from: ci.extent) ?? cg
     }
 
     private static func recognize(cgImage: CGImage,
