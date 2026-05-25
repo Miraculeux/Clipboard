@@ -17,6 +17,16 @@
             "request": "attach",
             "name": "Attach to ClipboardKit",
             "program": "${workspaceFolder}/.build/xcode/Build/Products/Debug/ClipboardKit.app/Contents/MacOS/ClipboardKit"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:Clipboard}",
+            "name": "Release ClipboardKit",
+            "target": "ClipboardKit",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release ClipboardKit"
         }
     ]
 }

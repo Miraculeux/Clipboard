@@ -11,8 +11,8 @@ import Quartz
 /// Because our app uses the `.accessory` activation policy (LSUIElement),
 /// panels owned by it cannot normally become key. We temporarily switch to
 /// `.regular` while the preview is open and restore `.accessory` on close.
-final class ImageQuickPreview: NSObject {
-    static let shared = ImageQuickPreview()
+final class ImageQuickPreview: NSObject, @unchecked Sendable {
+    nonisolated(unsafe) static let shared = ImageQuickPreview()
 
     fileprivate var items: [QLItem] = []
     private(set) var currentPath: String?

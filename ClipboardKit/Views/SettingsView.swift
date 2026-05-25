@@ -67,56 +67,80 @@ struct SettingsView: View {
                             .frame(width: 120, alignment: .trailing)
                         Toggle("Launch at login", isOn: $settings.launchAtLogin)
                     }
+                    GridRow {
+                        Text("Paste:")
+                            .frame(width: 120, alignment: .trailing)
+                        Toggle("Always paste as plain text (strip formatting)", isOn: $settings.alwaysPastePlainText)
+                    }
                 }
                 .padding(8)
             }
 
-            GroupBox("Shortcut") {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Text("⌘⇧V")
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color(NSColor.controlBackgroundColor))
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-                            )
-                        Text("Toggle clipboard history panel")
-                            .foregroundStyle(.secondary)
-                            .font(.callout)
+            GroupBox("Shortcuts") {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(HotkeyAction.allCases, id: \.self) { action in
+                        HStack(alignment: .center, spacing: 12) {
+                            Text(action.title)
+                                .frame(width: 200, alignment: .leading)
+                            HotkeyRecorderView(action: action, settings: settings)
+                            Spacer()
+                        }
                     }
-                    HStack(spacing: 8) {
-                        Text("⌘⇧S")
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color(NSColor.controlBackgroundColor))
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-                            )
-                        Text("Capture screen region to clipboard")
-                            .foregroundStyle(.secondary)
-                            .font(.callout)
+                    Text("Press Esc while recording to cancel.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(8)
+            }
+
+            GroupBox("Screenshot") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Capture delay:")
+                            .frame(width: 120, alignment: .trailing)
+                        Picker("", selection: $settings.captureDelaySeconds) {
+                            Text("None").tag(0)
+                            Text("3s").tag(3)
+                            Text("5s").tag(5)
+                            Text("10s").tag(10)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 220)
+                        Spacer()
                     }
-                    HStack(spacing: 8) {
-                        Text("⌘⇧L")
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color(NSColor.controlBackgroundColor))
-                            .cornerRadius(6)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-                            )
-                        Text("Long screenshot — scroll to capture, press again to finish")
-                            .foregroundStyle(.secondary)
-                            .font(.callout)
+
+                    HStack {
+                        Text("Post-capture:")
+                            .frame(width: 120, alignment: .trailing)
+                        Toggle("Show floating thumbnail (click to annotate)", isOn: $settings.showCaptureThumbnail)
+                    }
+
+                    HStack {
+                        Text("Save to disk:")
+                            .frame(width: 120, alignment: .trailing)
+                        Toggle("Also save each screenshot as a PNG file", isOn: $settings.saveScreenshotsToDisk)
+                    }
+
+                    if settings.saveScreenshotsToDisk {
+                        HStack {
+                            Text("Folder:")
+                                .frame(width: 120, alignment: .trailing)
+                            Text(settings.screenshotsFolderPath)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Button("Browse…") {
+                                if let p = settings.selectScreenshotsFolder() {
+                                    settings.screenshotsFolderPath = p
+                                }
+                            }
+                            Button("Reveal") {
+                                NSWorkspace.shared.open(URL(fileURLWithPath: settings.screenshotsFolderPath))
+                            }
+                        }
                     }
                 }
                 .padding(8)

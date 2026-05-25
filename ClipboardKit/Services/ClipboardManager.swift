@@ -3,13 +3,17 @@ import AppKit
 import Combine
 import Carbon.HIToolbox
 
-class ClipboardManager: ObservableObject {
-    static let shared = ClipboardManager()
+class ClipboardManager: ObservableObject, @unchecked Sendable {
+    nonisolated(unsafe) static let shared = ClipboardManager()
 
     @Published var history: [ClipboardItem] = []
     @Published var searchText: String = ""
+    @Published var selectedCategory: HistoryCategory = .clipboard
+    /// Item currently highlighted by keyboard navigation in the popover.
+    @Published var keyboardSelectedID: ClipboardItem.ID?
     /// Cached, debounced filtered view of `history`. Recomputed only when
-    /// `history` or `searchText` actually changes (debounced for typing).
+    /// `history`, `searchText`, or `selectedCategory` actually changes
+    /// (debounced for typing).
     @Published private(set) var filteredHistory: [ClipboardItem] = []
 
     private var timer: Timer?
@@ -185,13 +189,17 @@ class ClipboardManager: ObservableObject {
             let originalSize = rtfData.count
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
-                let (preview, sidecar) = self.offloadLargeTextIfNeeded(plainText)
+                // Always persist the RTF blob to a sidecar so "paste rich"
+                // can replay the original formatting later. The plain-text
+                // preview lives inline on the item for quick display.
+                let sidecarPath = self.writeRTFSidecar(rtfData)
+                let preview = self.previewText(plainText)
                 let item = ClipboardItem(
                     id: UUID(),
                     timestamp: Date(),
                     contentType: .richText,
                     textContent: preview,
-                    fileName: sidecar,
+                    fileName: sidecarPath,
                     filePaths: nil,
                     originalSize: originalSize
                 )
@@ -240,12 +248,30 @@ class ClipboardManager: ObservableObject {
             // Fall back to keeping the full text in memory if we can't write.
             return (text, nil)
         }
-        // Build a safe truncated preview. Cap by character count so we never
-        // split a multi-byte UTF-8 sequence.
+        return (previewText(text), fileURL.path)
+    }
+
+    /// Cap a string to a safe inline preview without splitting UTF-8.
+    private func previewText(_ text: String) -> String {
         let previewChars = min(text.count, 4_000)
-        let preview = String(text.prefix(previewChars))
+        if text.count <= previewChars { return text }
+        return String(text.prefix(previewChars))
             + "\n…(truncated, full content stored on disk)"
-        return (preview, fileURL.path)
+    }
+
+    /// Persist captured RTF data to a sidecar `.rtf` file so the history can
+    /// later replay rich-text pastes (preserving fonts, colors, links, etc.).
+    private func writeRTFSidecar(_ data: Data) -> String? {
+        let storagePath = settings.largeFileStoragePath
+        let dirURL = URL(fileURLWithPath: storagePath)
+        let fileURL = dirURL.appendingPathComponent(UUID().uuidString + ".rtf")
+        do {
+            try data.write(to: fileURL, options: .atomic)
+            return fileURL.path
+        } catch {
+            print("ClipboardManager: failed to write RTF sidecar — \(error.localizedDescription)")
+            return nil
+        }
     }
 
     private func saveImageItem(data: Data, isAlreadyPNG: Bool) -> ClipboardItem {
@@ -320,7 +346,9 @@ class ClipboardManager: ObservableObject {
         }
     }
 
-    func pasteItem(_ item: ClipboardItem) {
+    func pasteItem(_ item: ClipboardItem, asPlainText: Bool = false) {
+        let forcePlain = asPlainText || settings.alwaysPastePlainText
+
         // Image paste: read large data off the main thread to avoid UI hitches.
         if item.contentType == .image, let fileName = item.fileName {
             let url = URL(fileURLWithPath: fileName)
@@ -332,18 +360,48 @@ class ClipboardManager: ObservableObject {
                         self.pasteboard.clearContents()
                         self.pasteboard.setData(data, forType: .png)
                     }
-                    self.lastChangeCount = self.pasteboard.changeCount
-                    AppDelegate.shared.closePopoverAndRestoreFocus { [weak self] in
-                        self?.simulatePaste()
+                    self.finalizePasteAndSimulate()
+                }
+            }
+            return
+        }
+
+        // Rich text: prefer RTF sidecar so receivers get formatted output.
+        // When `forcePlain`, write only the plain string.
+        if item.contentType == .richText, let sidecarPath = item.fileName {
+            let url = URL(fileURLWithPath: sidecarPath)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else { return }
+                if sidecarPath.hasSuffix(".rtf"),
+                   let rtfData = try? Data(contentsOf: url) {
+                    let plain = NSAttributedString(rtf: rtfData, documentAttributes: nil)?
+                        .string ?? (item.textContent ?? "")
+                    DispatchQueue.main.async {
+                        self.pasteboard.clearContents()
+                        if forcePlain {
+                            self.pasteboard.setString(plain, forType: .string)
+                        } else {
+                            self.pasteboard.setData(rtfData, forType: .rtf)
+                            self.pasteboard.setString(plain, forType: .string)
+                        }
+                        self.finalizePasteAndSimulate()
                     }
+                    return
+                }
+                // Legacy .txt sidecar — only the plain body remains on disk.
+                let plain = (try? String(contentsOf: url, encoding: .utf8))
+                    ?? (item.textContent ?? "")
+                DispatchQueue.main.async {
+                    self.pasteboard.clearContents()
+                    self.pasteboard.setString(plain, forType: .string)
+                    self.finalizePasteAndSimulate()
                 }
             }
             return
         }
 
         // Large-text paste: full body lives on disk; read it in the background.
-        if (item.contentType == .text || item.contentType == .richText),
-           let sidecar = item.fileName {
+        if item.contentType == .text, let sidecar = item.fileName {
             let url = URL(fileURLWithPath: sidecar)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let fullText = (try? String(contentsOf: url, encoding: .utf8)) ?? (item.textContent ?? "")
@@ -351,10 +409,7 @@ class ClipboardManager: ObservableObject {
                     guard let self = self else { return }
                     self.pasteboard.clearContents()
                     self.pasteboard.setString(fullText, forType: .string)
-                    self.lastChangeCount = self.pasteboard.changeCount
-                    AppDelegate.shared.closePopoverAndRestoreFocus { [weak self] in
-                        self?.simulatePaste()
-                    }
+                    self.finalizePasteAndSimulate()
                 }
             }
             return
@@ -378,10 +433,11 @@ class ClipboardManager: ObservableObject {
             }
         }
 
-        // Update change count so we don't re-capture what we just pasted
-        lastChangeCount = pasteboard.changeCount
+        finalizePasteAndSimulate()
+    }
 
-        // Close popover, restore focus to previous app, then simulate paste
+    private func finalizePasteAndSimulate() {
+        lastChangeCount = pasteboard.changeCount
         AppDelegate.shared.closePopoverAndRestoreFocus { [weak self] in
             self?.simulatePaste()
         }
@@ -511,32 +567,53 @@ class ClipboardManager: ObservableObject {
     private func setupFilterPipeline() {
         // Initial value
         filteredHistory = history
-        // Don't `removeDuplicates` on `history` — our mutators always produce
-        // a real change and full-array equality is O(n × text), which is the
-        // exact thing we're trying to avoid.
-        //
-        // Both inputs are debounced: typing in the search box (120ms) and
-        // bursts of clipboard captures / pin / delete (60ms). Without the
-        // history debounce, every `addItem` immediately re-runs the filter on
-        // a background queue and bounces back to main, which adds up under
-        // rapid copies.
         let historyStream = $history
             .debounce(for: .milliseconds(60), scheduler: DispatchQueue.main)
         let queryStream = $searchText
             .debounce(for: .milliseconds(120), scheduler: DispatchQueue.main)
             .removeDuplicates()
+        let categoryStream = $selectedCategory
+            .removeDuplicates()
 
-        filterCancellable = Publishers.CombineLatest(historyStream, queryStream)
-            // Move the filter work off the main thread for large histories.
+        filterCancellable = Publishers.CombineLatest3(historyStream, queryStream, categoryStream)
             .receive(on: DispatchQueue.global(qos: .userInitiated))
-            .map { history, query -> [ClipboardItem] in
-                // Fast path: no query → no filtering, no allocation.
-                guard !query.isEmpty else { return history }
-                return history.filter {
+            .map { history, query, category -> [ClipboardItem] in
+                let categoryFiltered: [ClipboardItem]
+                switch category {
+                case .clipboard:
+                    categoryFiltered = history.filter { $0.contentType != .image }
+                case .screenshots:
+                    categoryFiltered = history.filter { $0.contentType == .image }
+                }
+                guard !query.isEmpty else { return categoryFiltered }
+                return categoryFiltered.filter {
                     $0.displayText.range(of: query, options: .caseInsensitive) != nil
                 }
             }
             .receive(on: DispatchQueue.main)
             .assign(to: \.filteredHistory, on: self)
+    }
+}
+
+/// Top-level segmentation surfaced in the history popover.
+/// `.clipboard` shows text/rich-text/file items; `.screenshots` shows images.
+enum HistoryCategory: String, CaseIterable, Identifiable {
+    case clipboard
+    case screenshots
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .clipboard: return "Clipboard"
+        case .screenshots: return "Screenshots"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .clipboard: return "doc.on.clipboard"
+        case .screenshots: return "photo"
+        }
     }
 }

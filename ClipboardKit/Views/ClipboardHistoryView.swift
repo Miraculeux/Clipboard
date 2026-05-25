@@ -36,6 +36,18 @@ struct ClipboardHistoryView: View {
             .padding(.top, 12)
             .padding(.bottom, 8)
 
+            // Category picker: split the popover into Clipboard / Screenshots
+            // so screenshots don't dominate the list when there are many.
+            Picker("", selection: $clipboardManager.selectedCategory) {
+                ForEach(HistoryCategory.allCases) { c in
+                    Label(c.title, systemImage: c.symbol).tag(c)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+
             // Search bar
             HStack {
                 Image(systemName: "magnifyingglass")
@@ -89,32 +101,62 @@ struct HistoryListView: View {
             VStack {
                 Spacer()
                 VStack(spacing: 8) {
-                    Image(systemName: "clipboard")
+                    Image(systemName: clipboardManager.selectedCategory.symbol)
                         .font(.system(size: 40))
                         .foregroundColor(.secondary)
-                    Text(clipboardManager.searchText.isEmpty ? "No clipboard history yet" : "No matching items")
+                    Text(emptyMessage)
                         .foregroundColor(.secondary)
-                    Text("Copy something to get started")
+                    Text(emptyHint)
                         .font(.caption)
                         .foregroundColor(.secondary.opacity(0.7))
                 }
                 Spacer()
             }
         } else {
-            ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(clipboardManager.filteredHistory) { item in
-                        // `.equatable()` lets SwiftUI skip body re-eval
-                        // when `item` is unchanged — even if the parent
-                        // re-renders for an unrelated reason (e.g. another
-                        // capture published `history`).
-                        ClipboardItemRow(item: item)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 2) {
+                        ForEach(clipboardManager.filteredHistory) { item in
+                            // `.equatable()` lets SwiftUI skip body re-eval
+                            // when `item` is unchanged — even if the parent
+                            // re-renders for an unrelated reason (e.g. another
+                            // capture published `history`).
+                            ClipboardItemRow(
+                                item: item,
+                                isKeyboardSelected: item.id == clipboardManager.keyboardSelectedID
+                            )
                             .equatable()
+                            .id(item.id)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                }
+                .onChange(of: clipboardManager.keyboardSelectedID) { _, newID in
+                    if let newID {
+                        withAnimation(.easeInOut(duration: 0.12)) {
+                            proxy.scrollTo(newID, anchor: .center)
+                        }
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
             }
+        }
+    }
+
+    private var emptyMessage: String {
+        if !clipboardManager.searchText.isEmpty {
+            return "No matching items"
+        }
+        switch clipboardManager.selectedCategory {
+        case .clipboard: return "No clipboard history yet"
+        case .screenshots: return "No screenshots yet"
+        }
+    }
+
+    private var emptyHint: String {
+        switch clipboardManager.selectedCategory {
+        case .clipboard: return "Copy something to get started"
+        case .screenshots: return "Press ⌘⇧S to take one"
         }
     }
 }
@@ -126,7 +168,7 @@ struct HistoryFooterView: View {
 
     var body: some View {
         HStack {
-            Text("\(clipboardManager.history.count) items")
+            Text("\(clipboardManager.filteredHistory.count) / \(clipboardManager.history.count) items")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Spacer()
@@ -141,6 +183,7 @@ struct HistoryFooterView: View {
 
 struct ClipboardItemRow: View, Equatable {
     let item: ClipboardItem
+    let isKeyboardSelected: Bool
     @EnvironmentObject private var manager: ClipboardManager
     @State private var isHovered = false
     /// Snapshot of "5 minutes ago" computed once per row presentation.
@@ -150,12 +193,13 @@ struct ClipboardItemRow: View, Equatable {
     /// SwiftUI compares stored properties for change detection. With closures
     /// stored on the Row, every parent re-render produced new closure
     /// identities and forced every visible row to re-evaluate. This Row is
-    /// driven only by `item`; declare equality explicitly so `.equatable()`
-    /// can short-circuit body re-eval when `item` is unchanged. Property
-    /// wrappers like `@EnvironmentObject` and `@State` are intentionally
-    /// excluded from the comparison — they're storage, not identity.
-    static func == (lhs: ClipboardItemRow, rhs: ClipboardItemRow) -> Bool {
-        lhs.item == rhs.item
+    /// driven only by `item` and the keyboard-selected flag; declare equality
+    /// explicitly so `.equatable()` can short-circuit body re-eval when both
+    /// are unchanged. Property wrappers like `@EnvironmentObject` and `@State`
+    /// are intentionally excluded from the comparison — they're storage, not
+    /// identity.
+    static nonisolated func == (lhs: ClipboardItemRow, rhs: ClipboardItemRow) -> Bool {
+        lhs.item == rhs.item && lhs.isKeyboardSelected == rhs.isKeyboardSelected
     }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
@@ -226,6 +270,14 @@ struct ClipboardItemRow: View, Equatable {
                     .buttonStyle(.plain)
                     .help("Quick Look")
 
+                    Button(action: { Self.openAnnotator(path: fileName) }) {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 12, weight: .regular))
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Annotate…")
+
                     Button(action: { Self.saveImageAs(item) }) {
                         Image(systemName: "square.and.arrow.down")
                             .font(.system(size: 12, weight: .regular))
@@ -256,7 +308,7 @@ struct ClipboardItemRow: View, Equatable {
             .allowsHitTesting(isHovered)
         }
         .padding(8)
-        .background(isHovered ? Color.accentColor.opacity(0.1) : Color.clear)
+        .background(rowBackground)
         .cornerRadius(6)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -265,11 +317,60 @@ struct ClipboardItemRow: View, Equatable {
         .onHover { hovering in
             isHovered = hovering
         }
+        .onDrag { dragProvider() }
+        .contextMenu {
+            Button("Paste") { manager.pasteItem(item) }
+            Button("Paste as Plain Text") { manager.pasteItem(item, asPlainText: true) }
+                .keyboardShortcut(.return, modifiers: [.option])
+                .disabled(item.contentType == .image || item.contentType == .fileURL)
+            if item.contentType == .image, let fileName = item.fileName {
+                Divider()
+                Button("Annotate…") { Self.openAnnotator(path: fileName) }
+                Button("Quick Look") { Self.togglePreview(path: fileName) }
+                Button("Save to…") { Self.saveImageAs(item) }
+            }
+            Divider()
+            Button("Pin to top") { manager.pinItem(item) }
+            Button("Delete", role: .destructive) { manager.deleteItem(item) }
+        }
         .task(id: item.id) {
             relativeTimestamp = Self.relativeFormatter.localizedString(
                 for: item.timestamp,
                 relativeTo: Date()
             )
+        }
+    }
+
+    private var rowBackground: Color {
+        if isKeyboardSelected { return Color.accentColor.opacity(0.22) }
+        if isHovered { return Color.accentColor.opacity(0.10) }
+        return Color.clear
+    }
+
+    /// Build an `NSItemProvider` so the user can drag a history item out of
+    /// the popover into other apps. Images are dragged as the on-disk PNG so
+    /// receivers get a real file; files are dragged as their original URLs;
+    /// text is dragged as a plain string.
+    private func dragProvider() -> NSItemProvider {
+        switch item.contentType {
+        case .image:
+            if let path = item.fileName {
+                let url = URL(fileURLWithPath: path)
+                if let provider = NSItemProvider(contentsOf: url) {
+                    return provider
+                }
+            }
+            return NSItemProvider(object: (item.textContent ?? "") as NSString)
+        case .fileURL:
+            if let paths = item.filePaths, let first = paths.first {
+                let url = URL(fileURLWithPath: first)
+                if let provider = NSItemProvider(contentsOf: url) {
+                    return provider
+                }
+            }
+            return NSItemProvider(object: (item.textContent ?? "") as NSString)
+        case .text, .richText:
+            return NSItemProvider(object: (item.textContent ?? "") as NSString)
         }
     }
 
@@ -330,6 +431,24 @@ struct ClipboardItemRow: View, Equatable {
     /// Self-contained: derives everything it needs from `item`.
     fileprivate static func togglePreview(path: String) {
         ImageQuickPreview.shared.toggle(path: path)
+    }
+
+    /// Load the PNG at `path` from disk and open it in the annotation
+    /// window. Used by both the row's wand button and the context menu.
+    fileprivate static func openAnnotator(path: String) {
+        guard let image = NSImage(contentsOfFile: path) else { NSSound.beep(); return }
+        // Close the popover *synchronously* (close() bypasses the dismiss
+        // animation that performClose uses) so its window has fully gone away
+        // before we try to bring the annotator key. Otherwise the popover's
+        // closing animation steals focus on the very first invocation and the
+        // new window opens behind the previous frontmost app.
+        AppDelegate.shared?.popover.close()
+        ImageQuickPreview.shared.dismiss()
+        // Hop a runloop tick so the AppKit window server has actually torn
+        // down the popover before we order the annotator front.
+        DispatchQueue.main.async {
+            AnnotationWindowController.shared.present(image: image)
+        }
     }
 
     fileprivate static func saveImageAs(_ item: ClipboardItem) {

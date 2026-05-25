@@ -14,8 +14,8 @@ import CoreGraphics
 ///   4. Pressing the hotkey again, clicking **Done**, or pressing Return finishes
 ///      the capture; the stitched PNG is written to `NSPasteboard.general`.
 ///      Pressing **Cancel** or Esc throws the result away.
-final class LongScreenshotCapture {
-    static let shared = LongScreenshotCapture()
+final class LongScreenshotCapture: @unchecked Sendable {
+    nonisolated(unsafe) static let shared = LongScreenshotCapture()
 
     private var overlayWindows: [SelectionWindow] = []
     private var indicator: LongCaptureIndicatorPanel?
@@ -49,6 +49,7 @@ final class LongScreenshotCapture {
 
     // MARK: - Selection phase
 
+    @MainActor
     private func beginSelection() {
         if authDenied { NSSound.beep(); return }
         guard !isSelecting, !isCapturing else { return }
@@ -81,6 +82,7 @@ final class LongScreenshotCapture {
 
     // MARK: - Capture phase
 
+    @MainActor
     private func startCapture(rect screenRect: NSRect, on screen: NSScreen) {
         teardownOverlay()
         isSelecting = false
@@ -197,9 +199,8 @@ final class LongScreenshotCapture {
         if commit, let stitcher = stitcher, let cgImage = stitcher.finalize() {
             let bitmap = NSBitmapImageRep(cgImage: cgImage)
             if let png = bitmap.representation(using: .png, properties: [:]) {
-                let pb = NSPasteboard.general
-                pb.clearContents()
-                pb.setData(png, forType: .png)
+                let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+                CaptureOutput.shared.deliver(pngData: png, image: image)
             } else {
                 NSSound.beep()
             }

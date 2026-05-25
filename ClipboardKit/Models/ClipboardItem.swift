@@ -51,7 +51,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     /// Reused across all rows; `ByteCountFormatter` is documented as
     /// thread-safe for `string(fromByteCount:)`. Per-call construction was
     /// hot during list scroll because every visible row formats its size.
-    private static let byteFormatter: ByteCountFormatter = {
+    nonisolated(unsafe) private static let byteFormatter: ByteCountFormatter = {
         let f = ByteCountFormatter()
         f.countStyle = .file
         return f

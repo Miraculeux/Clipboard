@@ -5,8 +5,8 @@ import ImageIO
 /// Async, bounded cache of downscaled NSImage thumbnails for clipboard images.
 /// Keeps the SwiftUI list snappy by avoiding synchronous full-resolution
 /// `NSImage(contentsOfFile:)` calls during scrolling.
-final class ThumbnailCache {
-    static let shared = ThumbnailCache()
+final class ThumbnailCache: @unchecked Sendable {
+    nonisolated(unsafe) static let shared = ThumbnailCache()
 
     private let cache: NSCache<NSString, NSImage> = {
         let c = NSCache<NSString, NSImage>()
@@ -34,7 +34,7 @@ final class ThumbnailCache {
 
     func loadThumbnail(forPath path: String,
                        maxPixel: CGFloat,
-                       completion: @escaping (NSImage?) -> Void) {
+                       completion: @escaping @Sendable (NSImage?) -> Void) {
         let key = Self.key(path: path, maxPixel: maxPixel)
         if let img = cache.object(forKey: key) {
             completion(img)
@@ -85,8 +85,8 @@ final class ThumbnailCache {
 
 /// Tiny in-memory cache for `isDirectory` lookups so SwiftUI rows don't stat
 /// the filesystem on every redraw.
-final class FileTypeCache {
-    static let shared = FileTypeCache()
+final class FileTypeCache: @unchecked Sendable {
+    nonisolated(unsafe) static let shared = FileTypeCache()
 
     /// `NSCache` gives us automatic LRU-ish eviction under memory pressure and
     /// a hard count limit, so this never grows without bound (unlike a plain

@@ -20,16 +20,15 @@ struct ClipboardKitApp: App {
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    static private(set) var shared: AppDelegate!
+    nonisolated(unsafe) static private(set) var shared: AppDelegate!
     var statusItem: NSStatusItem!
     var popover: NSPopover!
     var settingsWindow: NSWindow?
     var clipboardManager = ClipboardManager.shared
     var settingsManager = SettingsManager.shared
     var previousApp: NSRunningApplication?
-    var hotKeyRef: EventHotKeyRef?
-    var screenshotHotKeyRef: EventHotKeyRef?
-    var longScreenshotHotKeyRef: EventHotKeyRef?
+    private var popoverKeyMonitor: Any?
+    private var popoverCloseObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -53,21 +52,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Start monitoring clipboard
         clipboardManager.startMonitoring()
 
-        // Register global hotkey: Cmd+Shift+V
-        registerCarbonHotkey()
+        // Register global hotkeys via HotkeyManager (configurable in Settings).
+        HotkeyManager.shared.install { action in
+            switch action {
+            case .toggleHistory:
+                AppDelegate.shared?.togglePopover()
+            case .captureRegion:
+                AppDelegate.shared?.captureScreenRegion()
+            case .captureLongScreenshot:
+                AppDelegate.shared?.toggleLongScreenshot()
+            case .captureFullScreen:
+                AppDelegate.shared?.captureFullScreen()
+            }
+        }
+
+        // First-run onboarding.
+        if !settingsManager.hasSeenOnboarding {
+            DispatchQueue.main.async {
+                OnboardingWindowController.shared.present()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         clipboardManager.stopMonitoring()
-        if let ref = hotKeyRef {
-            UnregisterEventHotKey(ref)
-        }
-        if let ref = screenshotHotKeyRef {
-            UnregisterEventHotKey(ref)
-        }
-        if let ref = longScreenshotHotKeyRef {
-            UnregisterEventHotKey(ref)
-        }
     }
 
     @objc func togglePopover() {
@@ -88,11 +96,87 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 previousApp = NSWorkspace.shared.frontmostApplication
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApp.activate()
+                installPopoverKeyMonitor()
             }
         }
     }
 
-    func closePopoverAndRestoreFocus(then action: @escaping () -> Void) {
+    /// Local key-event monitor active only while the popover is visible.
+    /// Supports ↑/↓ to move selection, Return to paste, Esc to close, and
+    /// ⌘+digit to paste the Nth visible item.
+    private func installPopoverKeyMonitor() {
+        removePopoverKeyMonitor()
+        // Seed keyboard selection on the first row so the user sees focus.
+        if clipboardManager.keyboardSelectedID == nil {
+            clipboardManager.keyboardSelectedID = clipboardManager.filteredHistory.first?.id
+        }
+        popoverKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.popover.isShown else { return event }
+            return self.handlePopoverKey(event)
+        }
+        if popoverCloseObserver == nil {
+            popoverCloseObserver = NotificationCenter.default.addObserver(
+                forName: NSPopover.didCloseNotification,
+                object: popover,
+                queue: .main
+            ) { [weak self] _ in
+                self?.removePopoverKeyMonitor()
+            }
+        }
+    }
+
+    private func removePopoverKeyMonitor() {
+        if let m = popoverKeyMonitor {
+            NSEvent.removeMonitor(m)
+            popoverKeyMonitor = nil
+        }
+    }
+
+    private func handlePopoverKey(_ event: NSEvent) -> NSEvent? {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let list = clipboardManager.filteredHistory
+        let asPlain = mods.contains(.option)
+
+        // ⌘+digit → quick paste of the Nth visible row.
+        if mods.subtracting(.option) == .command,
+           let chars = event.charactersIgnoringModifiers,
+           let digit = Int(chars), digit >= 1, digit <= 9, digit <= list.count {
+            clipboardManager.pasteItem(list[digit - 1], asPlainText: asPlain)
+            popover.performClose(nil)
+            return nil
+        }
+
+        switch Int(event.keyCode) {
+        case 125: // down
+            advanceSelection(by: 1, in: list)
+            return nil
+        case 126: // up
+            advanceSelection(by: -1, in: list)
+            return nil
+        case 36, 76: // return / numpad enter
+            if let id = clipboardManager.keyboardSelectedID,
+               let item = list.first(where: { $0.id == id }) {
+                clipboardManager.pasteItem(item, asPlainText: asPlain)
+                popover.performClose(nil)
+                return nil
+            }
+            return event
+        case 53: // esc
+            popover.performClose(nil)
+            return nil
+        default:
+            return event
+        }
+    }
+
+    private func advanceSelection(by delta: Int, in list: [ClipboardItem]) {
+        guard !list.isEmpty else { return }
+        let currentIndex = list.firstIndex(where: { $0.id == clipboardManager.keyboardSelectedID }) ?? -1
+        let nextIndex = max(0, min(list.count - 1, currentIndex + delta))
+        clipboardManager.keyboardSelectedID = list[nextIndex].id
+    }
+
+    func closePopoverAndRestoreFocus(then action: @escaping @Sendable () -> Void) {
         popover.performClose(nil)
         ImageQuickPreview.shared.dismiss()
         // Re-activate the previous app so paste goes into the right place
@@ -136,73 +220,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func registerCarbonHotkey() {
-        // Install Carbon event handler for hotkey
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let handlerResult = InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
-            var hotkeyID = EventHotKeyID()
-            let status = GetEventParameter(event,
-                                           EventParamName(kEventParamDirectObject),
-                                           EventParamType(typeEventHotKeyID),
-                                           nil,
-                                           MemoryLayout<EventHotKeyID>.size,
-                                           nil,
-                                           &hotkeyID)
-            guard status == noErr else { return status }
-
-            DispatchQueue.main.async {
-                switch hotkeyID.id {
-                case 1:
-                    AppDelegate.shared?.togglePopover()
-                case 2:
-                    AppDelegate.shared?.captureScreenRegion()
-                case 3:
-                    AppDelegate.shared?.toggleLongScreenshot()
-                default:
-                    break
-                }
-            }
-            return noErr
-        }, 1, &eventType, nil, nil)
-
-        guard handlerResult == noErr else {
-            print("Failed to install event handler: \(handlerResult)")
-            return
-        }
-
-        let signature = OSType(0x434C4950) // "CLIP"
-
-        // Register Cmd+Shift+V — show clipboard history
-        let pasteHotkeyID = EventHotKeyID(signature: signature, id: 1)
-        let pasteModifiers: UInt32 = UInt32(cmdKey | shiftKey)
-        let pasteStatus = RegisterEventHotKey(UInt32(kVK_ANSI_V), pasteModifiers, pasteHotkeyID,
-                                              GetApplicationEventTarget(), 0, &hotKeyRef)
-        if pasteStatus != noErr {
-            print("Failed to register Cmd+Shift+V hotkey: \(pasteStatus)")
-        } else {
-            print("Global hotkey Cmd+Shift+V registered successfully")
-        }
-
-        // Register Cmd+Shift+S — interactive screen region snapshot to clipboard
-        let snapHotkeyID = EventHotKeyID(signature: signature, id: 2)
-        let snapModifiers: UInt32 = UInt32(cmdKey | shiftKey)
-        let snapStatus = RegisterEventHotKey(UInt32(kVK_ANSI_S), snapModifiers, snapHotkeyID,
-                                             GetApplicationEventTarget(), 0, &screenshotHotKeyRef)
-        if snapStatus != noErr {
-            print("Failed to register Cmd+Shift+S hotkey: \(snapStatus)")
-        } else {
-            print("Global hotkey Cmd+Shift+S registered successfully")
-        }
-
-        // Register Cmd+Shift+L — long (scrolling) screenshot. Pressing again stops & commits.
-        let longHotkeyID = EventHotKeyID(signature: signature, id: 3)
-        let longModifiers: UInt32 = UInt32(cmdKey | shiftKey)
-        let longStatus = RegisterEventHotKey(UInt32(kVK_ANSI_L), longModifiers, longHotkeyID,
-                                             GetApplicationEventTarget(), 0, &longScreenshotHotKeyRef)
-        if longStatus != noErr {
-            print("Failed to register Cmd+Shift+L hotkey: \(longStatus)")
-        } else {
-            print("Global hotkey Cmd+Shift+L registered successfully")
-        }
+        // Deprecated: hotkey registration now lives in `HotkeyManager`.
+        // Kept as an empty stub in case external callers still reference it.
     }
 
     /// Starts the in-app interactive region capture: a gray overlay covers every screen,
@@ -218,5 +237,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// press stops capturing and copies the stitched PNG to the clipboard.
     func toggleLongScreenshot() {
         LongScreenshotCapture.shared.toggle()
+    }
+
+    /// Capture the entire main display immediately, without a selection overlay.
+    /// Bound to the user-configured `captureFullScreen` hotkey.
+    func captureFullScreen() {
+        ScreenshotCapture.shared.captureFullScreen()
     }
 }

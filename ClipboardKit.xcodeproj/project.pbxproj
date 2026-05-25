@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		01EAF6B48C140CDC7D4C9179 /* ClipboardHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B593095269453479527DA7C /* ClipboardHistoryView.swift */; };
+		2DD50185C0D7BF1A8328E9E2 /* CaptureThumbnailHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30400DE41D1A03D1EF9C019 /* CaptureThumbnailHUD.swift */; };
 		38303E26AC04DA1ADC368D6B /* ImageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B255ADB53DE0015F33716F /* ImageCache.swift */; };
 		408B992C91A73AF1DC20380E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 47305372BE80C56BBD73431E /* Assets.xcassets */; };
 		53B1E2A7FCE6A68203C1B0E5 /* LongScreenshotCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA7D66DCA1DDB2E2137EDC7E /* LongScreenshotCapture.swift */; };
@@ -17,9 +18,14 @@
 		8EF891A6D97B67BF867FE727 /* SettingsManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DFB0F24E01A98D87BEDC899 /* SettingsManager.swift */; };
 		975243586678EBEA69F89DAC /* ClipboardItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFF9D5C3840119DE5C2D695E /* ClipboardItem.swift */; };
 		A58F18736A6AFD8B314F5975 /* ClipboardKitApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85AA8CDD5C00C7931F13426A /* ClipboardKitApp.swift */; };
+		ABD807A5354319E52AF52A8F /* AnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFE469D0ADAC03A555DC72AB /* AnnotationView.swift */; };
+		CA07EFDA1ED66CE15701DE2A /* HotkeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA33366F3D06C372692EFC80 /* HotkeyManager.swift */; };
+		D620551D6CC7061644A09A51 /* CaptureOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E5A3C9903EF4B13A960C01D /* CaptureOutput.swift */; };
+		D7417E22D48E4AC3852B2921 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490094570CF8BC10CB79E2DB /* OnboardingView.swift */; };
 		E792E24F80C6D537B9DC001D /* ScreenRecordingPermission.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95ED11AFBC038087D09E71CF /* ScreenRecordingPermission.swift */; };
 		E8572B3FA327664FAA78BCEF /* ImageQuickPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01A33AB8F95F95A6805841A4 /* ImageQuickPreview.swift */; };
 		EB26D0F19E6C10909C03B106 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D08E56CD9F1EB3CA31CAE /* SettingsView.swift */; };
+		EB85D99A9A12A9BA6989549D /* HotkeyRecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA97271BCA5B36199301EAEA /* HotkeyRecorderView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,14 +34,20 @@
 		2B593095269453479527DA7C /* ClipboardHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryView.swift; sourceTree = "<group>"; };
 		41B255ADB53DE0015F33716F /* ImageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageCache.swift; sourceTree = "<group>"; };
 		47305372BE80C56BBD73431E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		490094570CF8BC10CB79E2DB /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		597ED65E3D159C6F6E1253D8 /* ScreenshotCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotCapture.swift; sourceTree = "<group>"; };
+		7E5A3C9903EF4B13A960C01D /* CaptureOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureOutput.swift; sourceTree = "<group>"; };
 		85AA8CDD5C00C7931F13426A /* ClipboardKitApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardKitApp.swift; sourceTree = "<group>"; };
 		85EA7B07A36B1B6275C269FD /* DataMigration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataMigration.swift; sourceTree = "<group>"; };
 		8D1633C0A8D767177E6835E2 /* ClipboardManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardManager.swift; sourceTree = "<group>"; };
 		90BAD74CAD6315E1422160FA /* ClipboardKit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClipboardKit.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		95ED11AFBC038087D09E71CF /* ScreenRecordingPermission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenRecordingPermission.swift; sourceTree = "<group>"; };
+		B30400DE41D1A03D1EF9C019 /* CaptureThumbnailHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureThumbnailHUD.swift; sourceTree = "<group>"; };
+		CA97271BCA5B36199301EAEA /* HotkeyRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyRecorderView.swift; sourceTree = "<group>"; };
 		D65D08E56CD9F1EB3CA31CAE /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		DFE469D0ADAC03A555DC72AB /* AnnotationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationView.swift; sourceTree = "<group>"; };
 		EFF9D5C3840119DE5C2D695E /* ClipboardItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardItem.swift; sourceTree = "<group>"; };
+		FA33366F3D06C372692EFC80 /* HotkeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyManager.swift; sourceTree = "<group>"; };
 		FA7D66DCA1DDB2E2137EDC7E /* LongScreenshotCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongScreenshotCapture.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -55,8 +67,11 @@
 		221811BEE4DD8B9A3EFB2287 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				7E5A3C9903EF4B13A960C01D /* CaptureOutput.swift */,
+				B30400DE41D1A03D1EF9C019 /* CaptureThumbnailHUD.swift */,
 				8D1633C0A8D767177E6835E2 /* ClipboardManager.swift */,
 				85EA7B07A36B1B6275C269FD /* DataMigration.swift */,
+				FA33366F3D06C372692EFC80 /* HotkeyManager.swift */,
 				41B255ADB53DE0015F33716F /* ImageCache.swift */,
 				01A33AB8F95F95A6805841A4 /* ImageQuickPreview.swift */,
 				FA7D66DCA1DDB2E2137EDC7E /* LongScreenshotCapture.swift */,
@@ -77,7 +92,10 @@
 		67E39FC85B3497EFE24AB13B /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				DFE469D0ADAC03A555DC72AB /* AnnotationView.swift */,
 				2B593095269453479527DA7C /* ClipboardHistoryView.swift */,
+				CA97271BCA5B36199301EAEA /* HotkeyRecorderView.swift */,
+				490094570CF8BC10CB79E2DB /* OnboardingView.swift */,
 				D65D08E56CD9F1EB3CA31CAE /* SettingsView.swift */,
 			);
 			path = Views;
@@ -130,6 +148,10 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
+					4B15DE78C303743FCB770DED = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
 				};
 			};
 			buildConfigurationList = FAC0A0F914F0DA557F3673FA /* Build configuration list for PBXProject "ClipboardKit" */;
@@ -167,14 +189,20 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ABD807A5354319E52AF52A8F /* AnnotationView.swift in Sources */,
+				D620551D6CC7061644A09A51 /* CaptureOutput.swift in Sources */,
+				2DD50185C0D7BF1A8328E9E2 /* CaptureThumbnailHUD.swift in Sources */,
 				01EAF6B48C140CDC7D4C9179 /* ClipboardHistoryView.swift in Sources */,
 				975243586678EBEA69F89DAC /* ClipboardItem.swift in Sources */,
 				A58F18736A6AFD8B314F5975 /* ClipboardKitApp.swift in Sources */,
 				7D0BA0C7B27336E6381469CF /* ClipboardManager.swift in Sources */,
 				5F1FD918FEFE8897112201DC /* DataMigration.swift in Sources */,
+				CA07EFDA1ED66CE15701DE2A /* HotkeyManager.swift in Sources */,
+				EB85D99A9A12A9BA6989549D /* HotkeyRecorderView.swift in Sources */,
 				38303E26AC04DA1ADC368D6B /* ImageCache.swift in Sources */,
 				E8572B3FA327664FAA78BCEF /* ImageQuickPreview.swift in Sources */,
 				53B1E2A7FCE6A68203C1B0E5 /* LongScreenshotCapture.swift in Sources */,
+				D7417E22D48E4AC3852B2921 /* OnboardingView.swift in Sources */,
 				E792E24F80C6D537B9DC001D /* ScreenRecordingPermission.swift in Sources */,
 				60F4474ACA44BF3B462C0AF2 /* ScreenshotCapture.swift in Sources */,
 				8EF891A6D97B67BF867FE727 /* SettingsManager.swift in Sources */,
@@ -253,8 +281,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = ClipboardKit/ClipboardKit.entitlements;
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_IDENTITY = 917D00D26282ED24CBD8014154B1AE304E4E6021;
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
@@ -266,8 +296,9 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.clipboard.ClipboardKit;
 				PRODUCT_NAME = ClipboardKit;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
-				SWIFT_VERSION = 5.9;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};
@@ -332,8 +363,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = ClipboardKit/ClipboardKit.entitlements;
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_IDENTITY = 917D00D26282ED24CBD8014154B1AE304E4E6021;
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
@@ -345,8 +378,9 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.clipboard.ClipboardKit;
 				PRODUCT_NAME = ClipboardKit;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
-				SWIFT_VERSION = 5.9;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};

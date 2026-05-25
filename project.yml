@@ -23,6 +23,9 @@ targets:
         INFOPLIST_KEY_LSUIElement: YES
         INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026. All rights reserved."
         CODE_SIGN_ENTITLEMENTS: ClipboardKit/ClipboardKit.entitlements
-        SWIFT_VERSION: "5.9"
+        SWIFT_VERSION: "6.0"
         ENABLE_HARDENED_RUNTIME: NO
-        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: 917D00D26282ED24CBD8014154B1AE304E4E6021
+        PROVISIONING_PROFILE_SPECIFIER: ""
+        DEVELOPMENT_TEAM: ""
