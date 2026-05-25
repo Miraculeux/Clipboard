@@ -119,7 +119,7 @@ private final class AnnotationViewController: NSViewController {
 
     private var toolButtons: [AnnotationTool: NSButton] = [:]
     private var colorButtons: [ColorSwatchButton] = []
-    private weak var customColorWell: NSColorWell?
+    private weak var customColorWell: CustomColorPickerButton?
 
     init(image: NSImage, canvasSize: NSSize) {
         self.image = image
@@ -206,18 +206,18 @@ private final class AnnotationViewController: NSViewController {
             toolsStack.addArrangedSubview(btn)
         }
 
-        // Custom color picker — opens the system color panel so users can
-        // pick any hue / pull eyedropper from the screen, in addition to the
-        // preset swatches above.
-        let well = NSColorWell()
+        // Custom color picker — rainbow ring around the currently selected
+        // color makes it obvious this opens the system color panel /
+        // eyedropper instead of just being another preset swatch.
+        let well = CustomColorPickerButton()
         well.color = currentColor
         well.target = self
         well.action = #selector(colorWellChanged(_:))
         well.translatesAutoresizingMaskIntoConstraints = false
-        well.toolTip = "Custom color…"
+        well.toolTip = "Custom color (opens color picker)…"
         NSLayoutConstraint.activate([
             well.widthAnchor.constraint(equalToConstant: 26),
-            well.heightAnchor.constraint(equalToConstant: 22)
+            well.heightAnchor.constraint(equalToConstant: 26)
         ])
         customColorWell = well
         toolsStack.addArrangedSubview(well)
@@ -349,7 +349,7 @@ private final class AnnotationViewController: NSViewController {
         customColorWell?.color = sender.color
     }
 
-    @objc private func colorWellChanged(_ sender: NSColorWell) {
+    @objc private func colorWellChanged(_ sender: CustomColorPickerButton) {
         currentColor = sender.color
         // Any preset that happens to match exactly still highlights;
         // otherwise no swatch shows the selected state.
@@ -947,5 +947,114 @@ private final class ColorSwatchButton: NSButton {
         (isSelectedSwatch ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
         p.lineWidth = isSelectedSwatch ? 2 : 1
         p.stroke()
+    }
+}
+
+// MARK: - Custom color picker button
+
+/// A button that visually screams "open the color picker" by drawing a
+/// rainbow conic-gradient ring around the currently selected color.
+/// Tapping it brings up the shared `NSColorPanel` and reports color changes
+/// through `action`/`target`. We deliberately don't use `NSColorWell`:
+/// its boxy "color rectangle" look was too easy to mistake for one of the
+/// preset swatches that sit right next to it.
+final class CustomColorPickerButton: NSControl {
+    var color: NSColor = .systemRed {
+        didSet { needsDisplay = true }
+    }
+
+    private static var sharedPanelObserverInstalled = false
+    /// Tracks whether this particular button is currently the recipient of
+    /// the shared color panel. Without this, every picker on screen would
+    /// react to one user dragging the panel.
+    private var isActive = false
+    /// Weakly tracks the button that currently owns the shared color panel
+    /// so we can clear its `isActive` flag when ownership transfers.
+    private static weak var currentOwner: CustomColorPickerButton?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 26, height: 26) }
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let panel = NSColorPanel.shared
+        panel.color = color
+        panel.showsAlpha = false
+        // Reset any previous picker's hold on the panel so only one button
+        // listens at a time. The shared panel doesn't expose its current
+        // target/action publicly, so we track ownership ourselves.
+        Self.currentOwner?.isActive = false
+        Self.currentOwner = self
+        panel.setTarget(self)
+        panel.setAction(#selector(panelChanged(_:)))
+        isActive = true
+        NSApp.activate()
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func panelChanged(_ sender: NSColorPanel) {
+        guard isActive else { return }
+        color = sender.color
+        sendAction(action, to: target)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let rect = bounds.insetBy(dx: 1, dy: 1)
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let outerRadius = min(rect.width, rect.height) / 2
+        let ringWidth: CGFloat = max(3, outerRadius * 0.32)
+        let innerRadius = outerRadius - ringWidth
+
+        // --- Rainbow ring (drawn as many small filled wedges). 36 steps
+        // gives a smooth gradient without going overboard on draw calls.
+        let steps = 36
+        for i in 0..<steps {
+            let startAngle = (CGFloat(i)     / CGFloat(steps)) * 2 * .pi
+            let endAngle   = (CGFloat(i + 1) / CGFloat(steps)) * 2 * .pi
+            let hue = CGFloat(i) / CGFloat(steps)
+            let segColor = NSColor(hue: hue, saturation: 1.0, brightness: 1.0, alpha: 1.0).cgColor
+            ctx.setFillColor(segColor)
+            ctx.beginPath()
+            ctx.move(to: center)
+            ctx.addArc(center: center, radius: outerRadius,
+                       startAngle: startAngle, endAngle: endAngle, clockwise: false)
+            ctx.closePath()
+            ctx.fillPath()
+        }
+
+        // Punch out the inner disc so the rainbow becomes a ring, and fill
+        // the inner disc with the current color so the button doubles as a
+        // preview of what's selected.
+        ctx.setFillColor(NSColor.windowBackgroundColor.cgColor)
+        ctx.fillEllipse(in: CGRect(x: center.x - innerRadius, y: center.y - innerRadius,
+                                   width: innerRadius * 2, height: innerRadius * 2))
+        let swatchInset: CGFloat = 1.5
+        let swatchRect = CGRect(x: center.x - innerRadius + swatchInset,
+                                y: center.y - innerRadius + swatchInset,
+                                width: (innerRadius - swatchInset) * 2,
+                                height: (innerRadius - swatchInset) * 2)
+        ctx.setFillColor(color.cgColor)
+        ctx.fillEllipse(in: swatchRect)
+
+        // Subtle hairline so the button reads on light + dark backgrounds.
+        ctx.setStrokeColor(NSColor.separatorColor.withAlphaComponent(0.6).cgColor)
+        ctx.setLineWidth(0.5)
+        ctx.strokeEllipse(in: CGRect(x: center.x - outerRadius + 0.25,
+                                     y: center.y - outerRadius + 0.25,
+                                     width: outerRadius * 2 - 0.5,
+                                     height: outerRadius * 2 - 0.5))
     }
 }
