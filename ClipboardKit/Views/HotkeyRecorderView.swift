@@ -13,20 +13,28 @@ struct HotkeyRecorderView: View {
     @State private var isRecording = false
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             HotkeyRecorderField(isRecording: $isRecording, action: action)
-                .frame(width: 140, height: 24)
+                .frame(width: 130, height: 24)
             Button(isRecording ? "Cancel" : "Record") {
                 isRecording.toggle()
             }
-            Button("Default") {
+            .frame(width: 72)
+            Button {
                 settings.resetHotkey(action)
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
             }
-            Button("Clear") {
+            .help("Restore default")
+            Button {
                 settings.setHotkey(.disabled, for: action)
+            } label: {
+                Image(systemName: "xmark")
             }
+            .help("Clear shortcut")
         }
         .font(.callout)
+        .controlSize(.small)
     }
 }
 
