@@ -4,39 +4,97 @@ struct SettingsView: View {
     @EnvironmentObject var settings: SettingsManager
     @State private var historyCountText: String = ""
     @State private var showClearConfirmation = false
+    @State private var selection: Section = .general
+
+    /// The settings sections that appear in the sidebar. Order = display order.
+    private enum Section: String, CaseIterable, Identifiable {
+        case general, shortcuts, screenshot, storage, about
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .general:    return "General"
+            case .shortcuts:  return "Shortcuts"
+            case .screenshot: return "Screenshot"
+            case .storage:    return "Storage"
+            case .about:      return "About"
+            }
+        }
+        var systemImage: String {
+            switch self {
+            case .general:    return "gearshape"
+            case .shortcuts:  return "keyboard"
+            case .screenshot: return "camera.viewfinder"
+            case .storage:    return "externaldrive"
+            case .about:      return "info.circle"
+            }
+        }
+        /// Tint applied to the icon — gives each row a recognisable colour
+        /// the same way macOS System Settings does.
+        var tint: Color {
+            switch self {
+            case .general:    return .gray
+            case .shortcuts:  return .blue
+            case .screenshot: return .orange
+            case .storage:    return .purple
+            case .about:      return .green
+            }
+        }
+    }
 
     var body: some View {
-        TabView {
-            generalTab
-                .tabItem {
-                    Label("General", systemImage: "gear")
+        NavigationSplitView {
+            List(Section.allCases, selection: $selection) { section in
+                NavigationLink(value: section) {
+                    Label {
+                        Text(section.title)
+                    } icon: {
+                        Image(systemName: section.systemImage)
+                            .foregroundStyle(.white)
+                            .frame(width: 20, height: 20)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(section.tint)
+                            )
+                    }
                 }
-
-            storageTab
-                .tabItem {
-                    Label("Storage", systemImage: "externaldrive")
-                }
-
-            aboutTab
-                .tabItem {
-                    Label("About", systemImage: "info.circle")
-                }
+            }
+            .listStyle(.sidebar)
+            .navigationTitle("Settings")
+            .navigationSplitViewColumnWidth(min: 170, ideal: 180, max: 220)
+        } detail: {
+            ScrollView {
+                content(for: selection)
+                    .padding(20)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .navigationTitle(selection.title)
         }
-        .frame(width: 480, height: 320)
+        .frame(minWidth: 640, idealWidth: 720, minHeight: 420, idealHeight: 460)
         .onAppear {
             historyCountText = "\(settings.maxHistoryCount)"
+        }
+    }
+
+    @ViewBuilder
+    private func content(for section: Section) -> some View {
+        switch section {
+        case .general:    generalTab
+        case .shortcuts:  shortcutsTab
+        case .screenshot: screenshotTab
+        case .storage:    storageTab
+        case .about:      aboutTab
         }
     }
 
     // MARK: - General Tab
 
     private var generalTab: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 18) {
             GroupBox("History") {
-                Grid(alignment: .leading, verticalSpacing: 10) {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
                     GridRow {
                         Text("Max items:")
-                            .frame(width: 120, alignment: .trailing)
+                            .gridColumnAlignment(.trailing)
                         HStack(spacing: 8) {
                             TextField("", text: $historyCountText)
                                 .frame(width: 60)
@@ -57,52 +115,74 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    GridRow {
-                        Text("Notifications:")
-                            .frame(width: 120, alignment: .trailing)
-                        Toggle("Show when item is captured", isOn: $settings.showNotifications)
-                    }
-                    GridRow {
-                        Text("Startup:")
-                            .frame(width: 120, alignment: .trailing)
-                        Toggle("Launch at login", isOn: $settings.launchAtLogin)
-                    }
-                    GridRow {
-                        Text("Paste:")
-                            .frame(width: 120, alignment: .trailing)
-                        Toggle("Always paste as plain text (strip formatting)", isOn: $settings.alwaysPastePlainText)
-                    }
-                    GridRow {
-                        Text("")
-                            .frame(width: 120, alignment: .trailing)
-                        Toggle("Restore previous clipboard after paste", isOn: $settings.restoreClipboardAfterPaste)
-                    }
                 }
-                .padding(8)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            GroupBox("Shortcuts") {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(HotkeyAction.allCases, id: \.self) { action in
-                        HStack(alignment: .center, spacing: 12) {
-                            Text(action.title)
-                                .frame(width: 200, alignment: .leading)
-                            HotkeyRecorderView(action: action, settings: settings)
-                            Spacer()
-                        }
-                    }
-                    Text("Press Esc while recording to cancel.")
+            GroupBox("Behavior") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Launch at login", isOn: $settings.launchAtLogin)
+                    Toggle("Show notification when item is captured", isOn: $settings.showNotifications)
+                    Toggle("Always paste as plain text (strip formatting)", isOn: $settings.alwaysPastePlainText)
+                    Toggle("Restore previous clipboard after paste", isOn: $settings.restoreClipboardAfterPaste)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            GroupBox("Permissions") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Screen capture requires Screen Recording permission. After rebuilds you may need to toggle ClipboardKit off and on again in System Settings.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Open Screen Recording Settings…") {
+                        ScreenRecordingPermission.openScreenRecordingSettings()
+                    }
                 }
-                .padding(8)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+        }
+    }
 
-            GroupBox("Screenshot") {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Capture delay:")
-                            .frame(width: 120, alignment: .trailing)
+    // MARK: - Shortcuts Tab
+
+    private var shortcutsTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            GroupBox("Global Shortcuts") {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                    ForEach(HotkeyAction.allCases, id: \.self) { action in
+                        GridRow {
+                            Text(action.title)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            HotkeyRecorderView(action: action, settings: settings)
+                        }
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text("Press Esc while recording to cancel.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+            }
+        }
+    }
+
+    // MARK: - Screenshot Tab
+
+    private var screenshotTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            GroupBox("Capture") {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                    GridRow {
+                        Text("Delay:")
+                            .gridColumnAlignment(.trailing)
                         Picker("", selection: $settings.captureDelaySeconds) {
                             Text("None").tag(0)
                             Text("3s").tag(3)
@@ -111,61 +191,47 @@ struct SettingsView: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
-                        .frame(width: 220)
-                        Spacer()
+                        .frame(width: 240)
                     }
-
-                    HStack {
+                    GridRow {
                         Text("Post-capture:")
-                            .frame(width: 120, alignment: .trailing)
-                        Toggle("Show floating thumbnail (click to annotate)", isOn: $settings.showCaptureThumbnail)
+                            .gridColumnAlignment(.trailing)
+                        Toggle("Show floating thumbnail (click to annotate)",
+                               isOn: $settings.showCaptureThumbnail)
                     }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
-                    HStack {
-                        Text("Save to disk:")
-                            .frame(width: 120, alignment: .trailing)
-                        Toggle("Also save each screenshot as a PNG file", isOn: $settings.saveScreenshotsToDisk)
-                    }
+            GroupBox("Save to Disk") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Toggle("Also save each screenshot as a PNG file",
+                           isOn: $settings.saveScreenshotsToDisk)
 
                     if settings.saveScreenshotsToDisk {
                         HStack {
-                            Text("Folder:")
-                                .frame(width: 120, alignment: .trailing)
                             Text(settings.screenshotsFolderPath)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                            Spacer()
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             Button("Browse…") {
                                 if let p = settings.selectScreenshotsFolder() {
                                     settings.screenshotsFolderPath = p
                                 }
                             }
-                            Button("Reveal") {
-                                NSWorkspace.shared.open(URL(fileURLWithPath: settings.screenshotsFolderPath))
+                            Button("Reveal in Seeker") {
+                                revealInSeeker(path: settings.screenshotsFolderPath)
                             }
                         }
                     }
                 }
-                .padding(8)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-
-            GroupBox("Permissions") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Screen capture requires Screen Recording permission. After rebuilds, you may need to toggle ClipboardKit off and on again in System Settings.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Open Screen Recording Settings…") {
-                        ScreenRecordingPermission.openScreenRecordingSettings()
-                    }
-                }
-                .padding(8)
-            }
-
-            Spacer()
         }
-        .padding(16)
     }
 
     // MARK: - Storage Tab
@@ -208,8 +274,8 @@ struct SettingsView: View {
                                 settings.ensureStorageDirectoryExists()
                             }
                         }
-                        Button("Reveal in Finder") {
-                            NSWorkspace.shared.open(URL(fileURLWithPath: settings.largeFileStoragePath))
+                        Button("Reveal in Seeker") {
+                            revealInSeeker(path: settings.largeFileStoragePath)
                         }
                         Spacer()
                         Button("Clear All Files…") {
@@ -228,10 +294,7 @@ struct SettingsView: View {
                 }
                 .padding(8)
             }
-
-            Spacer()
         }
-        .padding(16)
     }
 
     // MARK: - About Tab
@@ -261,6 +324,18 @@ struct SettingsView: View {
     }
 
     // MARK: - Helpers
+
+    /// Ask Seeker (com.marvel.Seeker) to reveal a file or folder via its
+    /// `seeker://reveal?path=…` URL handler.
+    private func revealInSeeker(path: String) {
+        var comps = URLComponents()
+        comps.scheme = "seeker"
+        comps.host = "reveal"
+        comps.queryItems = [URLQueryItem(name: "path", value: path)]
+        if let url = comps.url {
+            NSWorkspace.shared.open(url)
+        }
+    }
 
     private func clearStoredFiles() {
         let fm = FileManager.default
