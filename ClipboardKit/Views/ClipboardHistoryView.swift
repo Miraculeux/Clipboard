@@ -290,13 +290,13 @@ struct ClipboardItemRow: View, Equatable {
                     .buttonStyle(.plain)
                     .help("Annotate…")
 
-                    Button(action: { Self.saveImageAs(item) }) {
-                        Image(systemName: "square.and.arrow.down")
+                    Button(action: { Self.revealInSeeker(path: fileName) }) {
+                        Image(systemName: "folder")
                             .font(.system(size: 12, weight: .regular))
                             .frame(width: 16, height: 16)
                     }
                     .buttonStyle(.plain)
-                    .help("Save to…")
+                    .help("Reveal in Seeker")
                 }
 
                 Button(action: { manager.togglePin(item) }) {
@@ -341,7 +341,7 @@ struct ClipboardItemRow: View, Equatable {
                 Button("Annotate…") { Self.openAnnotator(path: fileName) }
                 Button("Recognize Text (OCR)") { Self.recognizeText(path: fileName) }
                 Button("Quick Look") { Self.togglePreview(path: fileName) }
-                Button("Save to…") { Self.saveImageAs(item) }
+                Button("Reveal in Seeker") { Self.revealInSeeker(path: fileName) }
             }
             Divider()
             Button(item.isPinned ? "Unpin" : "Pin to top") { manager.togglePin(item) }
@@ -445,6 +445,18 @@ struct ClipboardItemRow: View, Equatable {
     /// Self-contained: derives everything it needs from `item`.
     fileprivate static func togglePreview(path: String) {
         ImageQuickPreview.shared.toggle(path: path)
+    }
+
+    /// Ask Seeker (com.marvel.Seeker) to reveal the on-disk PNG. Sends a
+    /// `seeker://reveal?path=<absolute-path>` URL, which Seeker registers as
+    /// a URL handler.
+    fileprivate static func revealInSeeker(path: String) {
+        var comps = URLComponents()
+        comps.scheme = "seeker"
+        comps.host = "reveal"
+        comps.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let url = comps.url else { NSSound.beep(); return }
+        NSWorkspace.shared.open(url)
     }
 
     /// Load the PNG at `path` from disk and open it in the annotation
