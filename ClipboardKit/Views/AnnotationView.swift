@@ -62,6 +62,7 @@ enum AnnotationTool: String, CaseIterable {
     case callout
     case redact
     case blur
+    case blurTorn
     case crop
 
     var symbolName: String {
@@ -75,6 +76,7 @@ enum AnnotationTool: String, CaseIterable {
         case .callout: return "bubble.left"
         case .redact: return "eye.slash"
         case .blur: return "drop.degreesign"
+        case .blurTorn: return "scribble.variable"
         case .crop: return "crop"
         }
     }
@@ -90,6 +92,7 @@ enum AnnotationTool: String, CaseIterable {
         case .callout: return "Callout"
         case .redact: return "Redact"
         case .blur: return "Blur"
+        case .blurTorn: return "Torn Blur"
         case .crop: return "Crop"
         }
     }
@@ -253,6 +256,16 @@ private final class AnnotationViewController: NSViewController {
         redoBtn.keyEquivalentModifierMask = [.command, .shift]
         actionsStack.addArrangedSubview(undoBtn)
         actionsStack.addArrangedSubview(redoBtn)
+        let borderBlurBtn = Self.makeActionButton(symbol: "rectangle.center.inset.filled",
+                                                  label: "Border Blur (frame on blurred backdrop)",
+                                                  target: self,
+                                                  action: #selector(applyBorderBlur))
+        actionsStack.addArrangedSubview(borderBlurBtn)
+        let tornBorderBlurBtn = Self.makeActionButton(symbol: "scribble.variable",
+                                                      label: "Torn Border Blur (hand-torn frame on blurred backdrop)",
+                                                      target: self,
+                                                      action: #selector(applyTornBorderBlur))
+        actionsStack.addArrangedSubview(tornBorderBlurBtn)
         let ocrBtn = Self.makeActionButton(symbol: "text.viewfinder",
                                            label: "Recognize Text",
                                            target: self,
@@ -370,6 +383,19 @@ private final class AnnotationViewController: NSViewController {
 
     @objc private func performRedo(_ sender: Any?) {
         canvas.redoLast()
+    }
+
+    /// Bake annotations into the image, then surround the result with a
+    /// padded, heavily-blurred copy of itself for that "floating screenshot"
+    /// look. Undoable.
+    @objc private func applyBorderBlur(_ sender: Any?) {
+        canvas.applyBorderBlur()
+    }
+
+    /// Same backdrop as Border Blur, but the inset screenshot is clipped to
+    /// a hand-torn polygon for a ripped-paper boundary. Undoable.
+    @objc private func applyTornBorderBlur(_ sender: Any?) {
+        canvas.applyBorderBlur(torn: true)
     }
 
     /// Crop in-place so undo can restore the previous image+annotations.
@@ -602,6 +628,142 @@ private final class AnnotationCanvasView: NSView {
         needsDisplay = true
     }
 
+    /// Bake annotations + frame the image with a heavily-blurred padded
+    /// backdrop derived from itself. Aspect ratio is preserved (same %
+    /// padding all sides), so `displaySize` doesn't need to change — the
+    /// new image is just rendered at higher pixel resolution into the same
+    /// on-screen canvas. Undoable. When `torn` is true the output stays the
+    /// same size as the input (no extra frame padding); the original image
+    /// is clipped to a hand-torn polygon and the small inset around it
+    /// reveals the blurred backdrop of the screenshot itself.
+    func applyBorderBlur(torn: Bool = false) {
+        guard let baked = bakedImage() else { NSSound.beep(); return }
+        let bakedSize = baked.size
+        let shorter = min(bakedSize.width, bakedSize.height)
+
+        let newSize: NSSize
+        let imageRect: NSRect
+        let referenceInset: CGFloat
+        if torn {
+            // Torn variant: keep the canvas exactly the size of the input.
+            // The torn polygon is inset just enough that its perpendicular
+            // jitter (capped below) cannot poke past the canvas bounds.
+            newSize = bakedSize
+            referenceInset = max(8, floor(shorter * 0.06))
+            imageRect = NSRect(x: referenceInset, y: referenceInset,
+                               width: bakedSize.width - referenceInset * 2,
+                               height: bakedSize.height - referenceInset * 2)
+        } else {
+            // Padded frame variant: grow the canvas by `padPx` on every side
+            // so the original screenshot sits on a visible blurred border.
+            referenceInset = floor(shorter * 0.10)
+            newSize = NSSize(width: bakedSize.width + referenceInset * 2,
+                             height: bakedSize.height + referenceInset * 2)
+            imageRect = NSRect(x: referenceInset, y: referenceInset,
+                               width: bakedSize.width, height: bakedSize.height)
+        }
+
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(newSize.width),
+            pixelsHigh: Int(newSize.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { NSSound.beep(); return }
+        rep.size = newSize
+
+        NSGraphicsContext.saveGraphicsState()
+        guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else {
+            NSGraphicsContext.restoreGraphicsState()
+            NSSound.beep()
+            return
+        }
+        NSGraphicsContext.current = ctx
+
+        // Match `makeFlattenedRep`'s Y-flip so the resulting NSImage renders
+        // upright when drawn back into the flipped canvas. Without this each
+        // Border Blur invocation inverts the screenshot vertically.
+        let cg = ctx.cgContext
+        cg.translateBy(x: 0, y: newSize.height)
+        cg.scaleBy(x: 1, y: -1)
+
+        // 1. Backdrop: a heavily-blurred copy of the baked image scaled to
+        //    fill the (same-aspect) canvas. Same aspect means a simple
+        //    uniform scale — no cropping needed. Skipped for the torn
+        //    variant so the area outside the torn polygon stays fully
+        //    transparent — the result looks like a real torn-paper cut-out.
+        if !torn {
+            let backdrop = Self.makeBlurred(baked, heavy: true)
+            backdrop.draw(in: NSRect(origin: .zero, size: newSize),
+                          from: .zero,
+                          operation: .copy,
+                          fraction: 1.0)
+        }
+
+        // 2. Subtle drop shadow underneath the screenshot for a floating feel.
+        //    Shadow offset is in the (now Y-flipped) context, so a positive
+        //    Y component drops the shadow toward the visible bottom edge.
+        //    The torn variant uses a softer shadow because it only has the
+        //    small inset band to render into.
+        let shadow = NSShadow()
+        if torn {
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.22)
+            shadow.shadowBlurRadius = max(4, referenceInset * 0.35)
+            shadow.shadowOffset = NSSize(width: 0, height: max(2, referenceInset * 0.10))
+        } else {
+            shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
+            shadow.shadowBlurRadius = max(8, referenceInset * 0.4)
+            shadow.shadowOffset = NSSize(width: 0, height: max(4, referenceInset * 0.12))
+        }
+        shadow.set()
+
+        // 3. Foreground screenshot.
+        if torn {
+            // Clip the screenshot to a jagged perimeter. The outer shadow set
+            // above gets applied to the composited layer at endTransparency
+            // Layer, so it traces the irregular silhouette instead of a
+            // rectangle. The image itself is drawn at its native size (no
+            // padding), so the clipped band reveals the blurred backdrop.
+            let seed = Self.tornSeed(start: CGPoint(x: imageRect.minX, y: imageRect.minY),
+                                     end: CGPoint(x: imageRect.maxX, y: imageRect.maxY))
+            // amplitude < inset so jitter never escapes the canvas.
+            let amplitude = max(6, min(min(imageRect.width, imageRect.height) * 0.025,
+                                       referenceInset * 0.7))
+            let path = Self.tornRectPath(in: imageRect,
+                                         seed: seed,
+                                         amplitude: amplitude,
+                                         segmentsPerEdge: 32)
+            cg.beginTransparencyLayer(auxiliaryInfo: nil)
+            path.addClip()
+            baked.draw(in: NSRect(origin: .zero, size: newSize),
+                       from: .zero,
+                       operation: .sourceOver,
+                       fraction: 1.0)
+            cg.endTransparencyLayer()
+        } else {
+            baked.draw(in: imageRect,
+                       from: .zero,
+                       operation: .sourceOver,
+                       fraction: 1.0)
+        }
+
+        NSGraphicsContext.restoreGraphicsState()
+
+        let framed = NSImage(size: newSize)
+        framed.addRepresentation(rep)
+
+        performMutation {
+            self.image = framed
+            self.annotations.removeAll()
+            self.blurredImageCache = nil
+        }
+    }
+
     /// Bake current annotations into a fresh pixel-resolution image cropped
     /// to `displayRect`, then atomically swap it into the canvas. The pre-crop
     /// state is pushed to the undo stack so the user can recover it.
@@ -816,15 +978,81 @@ private final class AnnotationCanvasView: NSView {
         case .blur:
             let r = NSRect(x: min(p0.x, p1.x), y: min(p0.y, p1.y),
                            width: abs(p1.x - p0.x), height: abs(p1.y - p0.y))
-            guard r.width > 0, r.height > 0 else { break }
-            // Draw the whole pre-blurred image clipped to the rect so the
-            // blur looks continuous with the underlying screenshot.
+            guard r.width > 0, r.height > 0,
+                  let cgctx = NSGraphicsContext.current?.cgContext else { break }
+
+            // Feather scales with the shorter side so wide and tall selections
+            // both fade pleasantly; clamped so tiny rects still have a visible
+            // soft edge and large rects don't lose their entire interior.
+            let feather = max(2, min(min(r.width, r.height) * 0.22, 48 * scaleX))
+
             NSGraphicsContext.saveGraphicsState()
+            cgctx.beginTransparencyLayer(auxiliaryInfo: nil)
+
+            // Clip both the blurred image and the alpha-mask gradients to the
+            // user's rectangle so the soft-edge math is confined to that area.
             NSBezierPath(rect: r).addClip()
-            // We're scaling annotation coords by (scaleX, scaleY). The blurred
-            // image is at pixel resolution; if we're flattening, draw it at
-            // pixel coords (scaleX/scaleY = pixel/display ratio). Otherwise,
-            // draw it at display size to match the canvas image.
+
+            // Draw the pre-blurred image so the blurred region stays visually
+            // continuous with the surrounding screenshot.
+            if scaleX == 1 && scaleY == 1 {
+                blurredImage.draw(in: NSRect(origin: .zero, size: bounds.size))
+            } else {
+                blurredImage.draw(in: NSRect(origin: .zero,
+                                             size: NSSize(width: displaySize.width * scaleX,
+                                                          height: displaySize.height * scaleY)))
+            }
+
+            // Multiply the layer's alpha by four 1D ramps (one per edge) so
+            // the rectangle's interior stays fully blurred while every edge
+            // fades naturally. Overlapping ramps at corners give a soft
+            // rounded falloff for free.
+            cgctx.setBlendMode(.destinationIn)
+            let clearColor = CGColor(gray: 1, alpha: 0)
+            let opaqueColor = CGColor(gray: 1, alpha: 1)
+            if let ramp = CGGradient(colorsSpace: nil,
+                                     colors: [clearColor, opaqueColor] as CFArray,
+                                     locations: [0, 1]) {
+                let opts: CGGradientDrawingOptions = [.drawsBeforeStartLocation, .drawsAfterEndLocation]
+                cgctx.drawLinearGradient(ramp,
+                                         start: CGPoint(x: r.minX, y: r.midY),
+                                         end: CGPoint(x: r.minX + feather, y: r.midY),
+                                         options: opts)
+                cgctx.drawLinearGradient(ramp,
+                                         start: CGPoint(x: r.maxX, y: r.midY),
+                                         end: CGPoint(x: r.maxX - feather, y: r.midY),
+                                         options: opts)
+                cgctx.drawLinearGradient(ramp,
+                                         start: CGPoint(x: r.midX, y: r.minY),
+                                         end: CGPoint(x: r.midX, y: r.minY + feather),
+                                         options: opts)
+                cgctx.drawLinearGradient(ramp,
+                                         start: CGPoint(x: r.midX, y: r.maxY),
+                                         end: CGPoint(x: r.midX, y: r.maxY - feather),
+                                         options: opts)
+            }
+
+            cgctx.endTransparencyLayer()
+            NSGraphicsContext.restoreGraphicsState()
+        case .blurTorn:
+            let r = NSRect(x: min(p0.x, p1.x), y: min(p0.y, p1.y),
+                           width: abs(p1.x - p0.x), height: abs(p1.y - p0.y))
+            guard r.width > 0, r.height > 0 else { break }
+
+            // Hand-torn paper look: clip the pre-blurred image to a jagged
+            // polygon walked around the rect perimeter. The random offsets
+            // are seeded from the annotation's anchor coords so the pattern
+            // stays identical between the on-screen preview and the exported
+            // pixels (and between re-renders during scroll, undo, etc.).
+            let seed = Self.tornSeed(start: ann.start, end: ann.end)
+            let amplitude = max(3, min(min(r.width, r.height) * 0.05, 16 * scaleX))
+            let path = Self.tornRectPath(in: r,
+                                         seed: seed,
+                                         amplitude: amplitude,
+                                         segmentsPerEdge: 18)
+
+            NSGraphicsContext.saveGraphicsState()
+            path.addClip()
             if scaleX == 1 && scaleY == 1 {
                 blurredImage.draw(in: NSRect(origin: .zero, size: bounds.size))
             } else {
@@ -833,11 +1061,6 @@ private final class AnnotationCanvasView: NSView {
                                                           height: displaySize.height * scaleY)))
             }
             NSGraphicsContext.restoreGraphicsState()
-            // Subtle border so the user can still see where they blurred.
-            NSColor.white.withAlphaComponent(0.6).setStroke()
-            let outline = NSBezierPath(rect: r.insetBy(dx: 0.5, dy: 0.5))
-            outline.lineWidth = 1
-            outline.stroke()
         case .crop:
             // Crop has no permanent representation; only the in-progress drag
             // overlay is rendered.
@@ -873,6 +1096,91 @@ private final class AnnotationCanvasView: NSView {
         head.close()
         color.setFill()
         head.fill()
+    }
+
+    // MARK: - Torn Blur helpers
+
+    /// Tiny deterministic RNG (xorshift64) so the torn-edge pattern stays
+    /// identical between the on-screen preview and the exported pixels, and
+    /// across undo/redo or window resizes.
+    private struct TornRNG {
+        var state: UInt64
+        init(seed: UInt64) { state = seed == 0 ? 0xDEADBEEFCAFEBABE : seed }
+        mutating func next() -> UInt64 {
+            var x = state
+            x ^= x << 13
+            x ^= x >> 7
+            x ^= x << 17
+            state = x
+            return x
+        }
+        mutating func unit() -> CGFloat {
+            // Top 53 bits of xorshift output have the best statistical quality.
+            let u = next() >> 11
+            return CGFloat(u) / CGFloat(UInt64(1) << 53)
+        }
+        mutating func signed(_ amplitude: CGFloat) -> CGFloat {
+            (unit() * 2 - 1) * amplitude
+        }
+    }
+
+    /// Hash the annotation's start/end (always in display coords, immutable
+    /// after the drag finishes) into a 64-bit seed for the torn-edge RNG.
+    private static func tornSeed(start: CGPoint, end: CGPoint) -> UInt64 {
+        func quant(_ v: CGFloat) -> UInt64 {
+            UInt64(bitPattern: Int64((v * 100).rounded()))
+        }
+        var h = quant(start.x) &* 73856093
+        h ^= quant(start.y) &* 19349663
+        h ^= quant(end.x) &* 83492791
+        h ^= quant(end.y) &* 472882049
+        return h == 0 ? 0xA5A5A5A5A5A5A5A5 : h
+    }
+
+    /// Walks the four edges of `r`, dropping `segmentsPerEdge` vertices per
+    /// edge with a perpendicular jitter of ±`amplitude`. The closed polygon
+    /// roughly tracks the rectangle but has the ragged contour of torn paper.
+    private static func tornRectPath(in r: NSRect,
+                                     seed: UInt64,
+                                     amplitude: CGFloat,
+                                     segmentsPerEdge: Int) -> NSBezierPath {
+        var rng = TornRNG(seed: seed)
+        let steps = max(4, segmentsPerEdge)
+        let corners: [CGPoint] = [
+            CGPoint(x: r.minX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.maxY),
+            CGPoint(x: r.minX, y: r.maxY)
+        ]
+        // Perpendicular (outward) unit vector for each edge in screen coords.
+        let perps: [CGPoint] = [
+            CGPoint(x: 0, y: -1), // bottom edge
+            CGPoint(x: 1, y: 0),  // right edge
+            CGPoint(x: 0, y: 1),  // top edge
+            CGPoint(x: -1, y: 0)  // left edge
+        ]
+        let path = NSBezierPath()
+        for edge in 0..<4 {
+            let s = corners[edge]
+            let e = corners[(edge + 1) % 4]
+            let perp = perps[edge]
+            for i in 0..<steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                // Dampen the very-near-corner samples so adjacent edges meet
+                // without wild spikes at the four corners.
+                let damp: CGFloat = (i == 0 || i == steps - 1) ? 0.25 : 1.0
+                let off = rng.signed(amplitude) * damp
+                let pt = CGPoint(x: s.x + (e.x - s.x) * t + perp.x * off,
+                                 y: s.y + (e.y - s.y) * t + perp.y * off)
+                if edge == 0 && i == 0 {
+                    path.move(to: pt)
+                } else {
+                    path.line(to: pt)
+                }
+            }
+        }
+        path.close()
+        return path
     }
 
     /// `p0` is the tail tip (the anchor in the screenshot), `p1` is the
@@ -942,15 +1250,24 @@ private final class AnnotationCanvasView: NSView {
 
     /// Pre-compute a Gaussian-blurred copy of `source` so the blur tool can
     /// composite from it cheaply. Falls back to the original on any failure.
-    static func makeBlurred(_ source: NSImage) -> NSImage {
+    /// `heavy` ramps the radius up significantly for backdrop framing where
+    /// individual features should dissolve into colour gradients.
+    static func makeBlurred(_ source: NSImage, heavy: Bool = false) -> NSImage {
         guard let tiff = source.tiffRepresentation,
               let ciInput = CIImage(data: tiff) else {
             return source
         }
         let filter = CIFilter.gaussianBlur()
-        filter.inputImage = ciInput
-        // Radius scaled by image size so screenshots from any display feel similar.
-        filter.radius = Float(max(8, min(36, ciInput.extent.width * 0.014)))
+        // Clamp to extend edges before blurring so the result fills the full
+        // extent without dark fall-off at the borders (matters most for the
+        // heavy/backdrop variant).
+        filter.inputImage = ciInput.clampedToExtent()
+        if heavy {
+            filter.radius = Float(max(40, min(160, ciInput.extent.width * 0.06)))
+        } else {
+            // Radius scaled by image size so screenshots from any display feel similar.
+            filter.radius = Float(max(8, min(36, ciInput.extent.width * 0.014)))
+        }
         guard let outputCI = filter.outputImage?.cropped(to: ciInput.extent) else {
             return source
         }
