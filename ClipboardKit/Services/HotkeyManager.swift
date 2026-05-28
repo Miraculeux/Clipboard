@@ -7,6 +7,7 @@ enum HotkeyAction: Int, CaseIterable, Codable {
     case captureRegion = 2
     case captureLongScreenshot = 3
     case captureFullScreen = 4
+    case captureWindow = 5
 
     var title: String {
         switch self {
@@ -14,6 +15,7 @@ enum HotkeyAction: Int, CaseIterable, Codable {
         case .captureRegion: return "Capture screen region"
         case .captureLongScreenshot: return "Long (scrolling) screenshot"
         case .captureFullScreen: return "Capture full screen"
+        case .captureWindow: return "Capture window"
         }
     }
 
@@ -28,6 +30,10 @@ enum HotkeyAction: Int, CaseIterable, Codable {
             return HotkeyBinding(keyCode: UInt32(kVK_ANSI_L), modifiers: UInt32(cmdKey | shiftKey))
         case .captureFullScreen:
             // No default to avoid clashing with macOS's own ⌘⇧3; users opt in.
+            return .disabled
+        case .captureWindow:
+            // No default to avoid clashing with macOS's own ⌘⇧4 (Space);
+            // users opt in.
             return .disabled
         }
     }

@@ -63,6 +63,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 AppDelegate.shared?.toggleLongScreenshot()
             case .captureFullScreen:
                 AppDelegate.shared?.captureFullScreen()
+            case .captureWindow:
+                AppDelegate.shared?.captureWindow()
             }
         }
 
@@ -243,5 +245,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Bound to the user-configured `captureFullScreen` hotkey.
     func captureFullScreen() {
         ScreenshotCapture.shared.captureFullScreen()
+    }
+
+    /// Bring up the selection overlay already in window-pick mode so the
+    /// user can click any on-screen window to capture it. Bound to the
+    /// user-configured `captureWindow` hotkey.
+    func captureWindow() {
+        ScreenshotCapture.shared.captureWindow()
     }
 }

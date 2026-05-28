@@ -26,11 +26,27 @@ final class ScreenshotCapture: @unchecked Sendable {
         if delay > 0 {
             DispatchQueue.main.async { [weak self] in
                 CountdownHUD.shared.start(seconds: delay) {
-                    self?._begin()
+                    self?._begin(initialMode: .region)
                 }
             }
         } else {
-            DispatchQueue.main.async { self._begin() }
+            DispatchQueue.main.async { self._begin(initialMode: .region) }
+        }
+    }
+
+    /// Skip the drag-to-select phase entirely and bring the overlay up
+    /// already in window-pick mode, so the user can just click the desired
+    /// window. Honors the capture delay like the other entry points.
+    func captureWindow() {
+        let delay = SettingsManager.shared.captureDelaySeconds
+        if delay > 0 {
+            DispatchQueue.main.async { [weak self] in
+                CountdownHUD.shared.start(seconds: delay) {
+                    self?._begin(initialMode: .window)
+                }
+            }
+        } else {
+            DispatchQueue.main.async { self._begin(initialMode: .window) }
         }
     }
 
@@ -97,7 +113,7 @@ final class ScreenshotCapture: @unchecked Sendable {
     }
 
     @MainActor
-    private func _begin() {
+    private func _begin(initialMode: SelectionView.CaptureMode) {
         guard !isActive else { return }
         if authDenied {
             // Stay silent — prior attempt already informed the user. They can
@@ -124,6 +140,12 @@ final class ScreenshotCapture: @unchecked Sendable {
         let overlayWindowNumbers = Set(overlayWindows.map { $0.windowNumber })
         overlayWindows.forEach { $0.ignoredWindowNumbers = overlayWindowNumbers }
         overlayWindows.forEach { $0.orderFrontRegardless() }
+
+        // Optionally drop straight into window-pick mode so the user doesn't
+        // have to press Space first when invoking the dedicated hotkey.
+        if initialMode == .window {
+            overlayWindows.forEach { $0.setInitialMode(.window) }
+        }
 
         NSApp.activate()
         overlayWindows.first?.makeKey()
@@ -329,6 +351,14 @@ final class SelectionWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
+    /// Force the overlay into a specific capture mode at start. Used by the
+    /// dedicated window-screenshot entry point so the user doesn't have to
+    /// press Space first.
+    func setInitialMode(_ mode: SelectionView.CaptureMode) {
+        guard let view = contentView as? SelectionView else { return }
+        view.setCaptureMode(mode)
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // ESC
             onCancel?()
@@ -412,6 +442,13 @@ final class SelectionView: NSView {
             }
         }
         setNeedsDisplay(bounds)
+    }
+
+    /// Idempotent variant of `toggleCaptureMode` used at overlay startup so
+    /// the dedicated window-screenshot hotkey lands directly in window mode.
+    func setCaptureMode(_ mode: CaptureMode) {
+        guard mode != captureMode else { return }
+        toggleCaptureMode()
     }
 
     override func mouseDown(with event: NSEvent) {
