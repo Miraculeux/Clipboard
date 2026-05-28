@@ -307,6 +307,62 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
 
     // MARK: - History Management
 
+    // MARK: - Drag-in / drop import
+    //
+    // These mirror the pasteboard-handling paths above but accept payloads
+    // that came from a SwiftUI `.onDrop`. They intentionally don't write to
+    // `NSPasteboard.general` — the user dragged something into the popover
+    // because they want it in *history*, not on the system clipboard.
+
+    /// Import file URLs that were dropped onto the popover. Each invocation
+    /// produces one `.fileURL` history item (matching how the system
+    /// pasteboard groups multi-file selections).
+    func importDroppedFiles(paths: [String]) {
+        let captured = paths.filter { FileManager.default.fileExists(atPath: $0) }
+        guard !captured.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let totalSize = captured.reduce(0) { acc, path in
+                acc + ((try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0)
+            }
+            let item = ClipboardItem(
+                id: UUID(),
+                timestamp: Date(),
+                contentType: .fileURL,
+                textContent: captured.joined(separator: "\n"),
+                fileName: nil,
+                filePaths: captured,
+                originalSize: totalSize
+            )
+            self?.addItem(item)
+        }
+    }
+
+    /// Import raw image data dropped from another app (e.g. a browser).
+    func importDroppedImage(data: Data, isPNG: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let item = self.saveImageItem(data: data, isAlreadyPNG: isPNG)
+            self.addItem(item)
+        }
+    }
+
+    /// Import plain text dropped onto the popover.
+    func importDroppedText(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let (preview, sidecar) = offloadLargeTextIfNeeded(text)
+        let item = ClipboardItem(
+            id: UUID(),
+            timestamp: Date(),
+            contentType: .text,
+            textContent: preview,
+            fileName: sidecar,
+            filePaths: nil,
+            originalSize: text.utf8.count
+        )
+        addItem(item)
+    }
+
     private func addItem(_ item: ClipboardItem) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -346,10 +402,36 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                 }
             }
 
+            // The new item we'll actually insert. We may augment it with a
+            // link preview carried over from a removed duplicate so the user
+            // doesn't see the fancy card flicker back to a plain URL row
+            // every time they re-copy the same link.
+            var inserted = item
+            if inserted.contentType == .text,
+               let text = inserted.textContent,
+               let url = LinkMetadataService.detectURL(in: text) {
+                // Look for any other item that already cached a preview for
+                // exactly this URL string. This survives the dedup-removeAll
+                // above because the lookup happens before re-inserting.
+                if let cached = self.history.first(where: {
+                    $0.linkPreview?.url == url.absoluteString
+                })?.linkPreview {
+                    inserted.linkPreview = cached
+                } else {
+                    // Kick off an async fetch; the result is patched into the
+                    // item in place once it arrives. Only the URL is
+                    // captured so no retain cycle through the item itself.
+                    let pendingID = inserted.id
+                    LinkMetadataService.shared.fetch(url: url) { [weak self] preview in
+                        self?.applyLinkPreview(itemID: pendingID, preview: preview)
+                    }
+                }
+            }
+
             // Insert the fresh item right below the pinned section so pins
             // stay at the very top of the list.
             let pinnedCount = self.history.prefix(while: { $0.isPinned }).count
-            self.history.insert(item, at: pinnedCount)
+            self.history.insert(inserted, at: pinnedCount)
 
             // Trim to max count, but never evict pinned items. Pinned items
             // also don't count toward the cap so users can stockpile
@@ -368,6 +450,20 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                 }
             }
 
+            self.scheduleSave()
+        }
+    }
+
+    /// Patch the link preview onto an existing history item by ID, then
+    /// persist. No-op if the item was already removed (evicted by max-history
+    /// trim or deleted by the user) by the time the fetch returns.
+    private func applyLinkPreview(itemID: ClipboardItem.ID, preview: LinkPreview) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  let idx = self.history.firstIndex(where: { $0.id == itemID }) else { return }
+            var updated = self.history[idx]
+            updated.linkPreview = preview
+            self.history[idx] = updated
             self.scheduleSave()
         }
     }

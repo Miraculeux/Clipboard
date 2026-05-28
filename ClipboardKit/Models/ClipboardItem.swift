@@ -1,5 +1,44 @@
 import Foundation
 
+/// Cached metadata for a URL clipboard item. Fetched once via
+/// `LPMetadataProvider`, then persisted alongside the item so the rich
+/// preview survives relaunches. Heavy assets (thumbnail, favicon) live on
+/// disk in the app-support cache directory; only their paths travel here.
+struct LinkPreview: Codable, Equatable {
+    /// Canonical URL string the metadata was fetched for.
+    var url: String
+    /// Title from `LPLinkMetadata.title` if available.
+    var title: String?
+    /// Host portion of the URL, used as a small line under the title.
+    var domain: String
+    /// On-disk path to the OG image thumbnail, if one was extracted.
+    var imagePath: String?
+    /// On-disk path to the favicon, if one was extracted.
+    var iconPath: String?
+    /// When the fetch completed. Lets us refresh stale previews later.
+    var fetchedAt: Date
+    /// `true` if the fetch returned no metadata (DNS failure, 404, blocked).
+    /// We still persist the record so the UI doesn't keep retrying every
+    /// time the row renders.
+    var failed: Bool
+
+    init(url: String,
+         title: String? = nil,
+         domain: String,
+         imagePath: String? = nil,
+         iconPath: String? = nil,
+         fetchedAt: Date = Date(),
+         failed: Bool = false) {
+        self.url = url
+        self.title = title
+        self.domain = domain
+        self.imagePath = imagePath
+        self.iconPath = iconPath
+        self.fetchedAt = fetchedAt
+        self.failed = failed
+    }
+}
+
 struct ClipboardItem: Identifiable, Codable, Equatable {
     let id: UUID
     let timestamp: Date
@@ -12,6 +51,10 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     /// shown at the top of the list, never trimmed by the max-history cap,
     /// and survive across launches.
     var isPinned: Bool
+    /// Rich preview for URL text items, populated asynchronously after the
+    /// item is added. `nil` for non-URL items or while the fetch is in
+    /// flight. `LinkPreview.failed == true` means we tried and gave up.
+    var linkPreview: LinkPreview?
 
     enum ContentType: String, Codable {
         case text
@@ -27,7 +70,8 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
          fileName: String? = nil,
          filePaths: [String]? = nil,
          originalSize: Int,
-         isPinned: Bool = false) {
+         isPinned: Bool = false,
+         linkPreview: LinkPreview? = nil) {
         self.id = id
         self.timestamp = timestamp
         self.contentType = contentType
@@ -36,13 +80,15 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.filePaths = filePaths
         self.originalSize = originalSize
         self.isPinned = isPinned
+        self.linkPreview = linkPreview
     }
 
-    /// Custom decoder so payloads written before `isPinned` existed still
-    /// decode (defaults to `false`). Encoding is left to the synthesized
-    /// `Codable` conformance.
+    /// Custom decoder so payloads written before `isPinned` / `linkPreview`
+    /// existed still decode (they default to `false` / `nil`). Encoding is
+    /// left to the synthesized `Codable` conformance.
     private enum CodingKeys: String, CodingKey {
-        case id, timestamp, contentType, textContent, fileName, filePaths, originalSize, isPinned
+        case id, timestamp, contentType, textContent, fileName, filePaths,
+             originalSize, isPinned, linkPreview
     }
 
     init(from decoder: Decoder) throws {
@@ -55,6 +101,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.filePaths = try c.decodeIfPresent([String].self, forKey: .filePaths)
         self.originalSize = try c.decode(Int.self, forKey: .originalSize)
         self.isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+        self.linkPreview = try c.decodeIfPresent(LinkPreview.self, forKey: .linkPreview)
     }
 
     var displayText: String {

@@ -1,8 +1,13 @@
 import SwiftUI
+import UniformTypeIdentifiers
+import AppKit
 
 struct ClipboardHistoryView: View {
     @EnvironmentObject var clipboardManager: ClipboardManager
     @EnvironmentObject var settingsManager: SettingsManager
+    /// Highlight the popover border while the user is hovering a drag over
+    /// it, so the drop target is obviously discoverable.
+    @State private var isDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -83,10 +88,99 @@ struct ClipboardHistoryView: View {
             HistoryFooterView()
         }
         .frame(width: 350, height: 500)
+        .overlay(
+            // Accent ring while a drag is hovering over the popover; lets
+            // the user know this surface accepts drops without taking up
+            // permanent UI real estate.
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.accentColor, lineWidth: 2)
+                .padding(2)
+                .opacity(isDropTargeted ? 1 : 0)
+                .animation(.easeInOut(duration: 0.12), value: isDropTargeted)
+                .allowsHitTesting(false)
+        )
+        .onDrop(
+            of: [
+                UTType.fileURL,
+                UTType.image,
+                UTType.url,
+                UTType.text,
+                UTType.plainText,
+                UTType.utf8PlainText,
+            ],
+            isTargeted: $isDropTargeted,
+            perform: handleDrop(providers:)
+        )
     }
 
     private func openSettings() {
         AppDelegate.shared.openSettings()
+    }
+
+    /// Route a drop's providers to the right `ClipboardManager` import API.
+    /// File URLs win over images win over plain text so a drag of a single
+    /// PNG from Finder lands as a `.fileURL` item (with its real path)
+    /// instead of a re-encoded image blob.
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        let fileProviders = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        if !fileProviders.isEmpty {
+            collectFileURLs(from: fileProviders) { paths in
+                guard !paths.isEmpty else { return }
+                clipboardManager.importDroppedFiles(paths: paths)
+            }
+            return true
+        }
+
+        let imageProviders = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        if let imageProvider = imageProviders.first {
+            // Prefer PNG so we skip a TIFF→PNG transcode on the import path.
+            let pngID = UTType.png.identifier
+            let typeID = imageProvider.registeredTypeIdentifiers.first(where: { $0 == pngID })
+                ?? imageProvider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true })
+            guard let typeID else { return false }
+            imageProvider.loadDataRepresentation(forTypeIdentifier: typeID) { data, _ in
+                guard let data = data else { return }
+                DispatchQueue.main.async {
+                    clipboardManager.importDroppedImage(data: data, isPNG: typeID == pngID)
+                }
+            }
+            return true
+        }
+
+        for provider in providers {
+            if provider.canLoadObject(ofClass: NSString.self) {
+                _ = provider.loadObject(ofClass: NSString.self) { reading, _ in
+                    guard let text = reading as? String else { return }
+                    DispatchQueue.main.async {
+                        clipboardManager.importDroppedText(text)
+                    }
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Resolve every file-URL provider into a real path. The completion fires
+    /// exactly once, after every provider has resolved (or timed out).
+    private func collectFileURLs(from providers: [NSItemProvider],
+                                 completion: @escaping ([String]) -> Void) {
+        let group = DispatchGroup()
+        // `paths` is mutated from the loadItem completion callbacks (which
+        // may fire on arbitrary queues); funnel writes through `queue` so
+        // we don't race ordering.
+        var paths: [String] = []
+        let queue = DispatchQueue(label: "ClipboardKit.DropCollect")
+        for provider in providers {
+            group.enter()
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url = url, url.isFileURL {
+                    queue.async { paths.append(url.path) }
+                }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) { completion(paths) }
     }
 }
 
@@ -243,6 +337,8 @@ struct ClipboardItemRow: View, Equatable {
                                 .foregroundColor(.secondary)
                         }
                     }
+                } else if let preview = item.linkPreview, !preview.failed {
+                    linkPreviewCard(preview: preview, fallbackText: item.previewText)
                 } else {
                     Text(item.previewText)
                         .font(.system(size: 12))
@@ -407,6 +503,42 @@ struct ClipboardItemRow: View, Equatable {
         ThumbnailImageView(path: path, maxPixel: 160)
     }
 
+    /// Rich card rendering for URL items once `LinkMetadataService` has
+    /// resolved the OG metadata. Falls back to a plain URL line when the
+    /// title isn't available yet so the row never looks empty.
+    @ViewBuilder
+    private func linkPreviewCard(preview: LinkPreview, fallbackText: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            if let imagePath = preview.imagePath {
+                ThumbnailImageView(path: imagePath, maxPixel: 96)
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(Color.secondary.opacity(0.18), lineWidth: 0.5)
+                    )
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(preview.title ?? fallbackText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(2)
+                    .foregroundColor(.primary)
+                HStack(spacing: 4) {
+                    if let iconPath = preview.iconPath {
+                        ThumbnailImageView(path: iconPath, maxPixel: 32)
+                            .frame(width: 12, height: 12)
+                            .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+                    }
+                    Text(preview.domain)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private func fileIcon(for path: String) -> some View {
         let ext = (path as NSString).pathExtension.lowercased()
@@ -473,7 +605,7 @@ struct ClipboardItemRow: View, Equatable {
         // Hop a runloop tick so the AppKit window server has actually torn
         // down the popover before we order the annotator front.
         DispatchQueue.main.async {
-            AnnotationWindowController.shared.present(image: image)
+            AnnotationWindowController.shared.present(image: image, savedPath: path)
         }
     }
 
