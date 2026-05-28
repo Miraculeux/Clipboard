@@ -110,7 +110,7 @@ private final class ThumbnailPanel: NSPanel {
     private func openAnnotator() {
         guard let image = container.image else { return }
         onDismissRequested?()
-        AnnotationWindowController.shared.present(image: image)
+        AnnotationWindowController.shared.present(image: image, savedPath: savedURL?.path)
     }
 
     private func revealInFinder() {

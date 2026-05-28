@@ -12,7 +12,10 @@ final class AnnotationWindowController: @unchecked Sendable {
 
     private var window: NSWindow?
 
-    func present(image: NSImage) {
+    /// `savedPath`, when provided, is the on-disk PNG to overwrite when the
+    /// annotation window closes (auto-save). Passing nil disables auto-save
+    /// — the user can still hit ⌘C/↩ to copy out the result.
+    func present(image: NSImage, savedPath: String? = nil) {
         if let win = window {
             win.close()
             window = nil
@@ -32,7 +35,9 @@ final class AnnotationWindowController: @unchecked Sendable {
         let contentSize = NSSize(width: max(canvasSize.width, 920),
                                  height: canvasSize.height + toolbarHeight)
 
-        let controller = AnnotationViewController(image: image, canvasSize: canvasSize)
+        let controller = AnnotationViewController(image: image,
+                                                  canvasSize: canvasSize,
+                                                  savedPath: savedPath)
 
         let win = NSWindow(
             contentRect: NSRect(origin: .zero, size: contentSize),
@@ -115,6 +120,10 @@ struct Annotation {
 private final class AnnotationViewController: NSViewController {
     private let image: NSImage
     private let canvasSize: NSSize
+    /// Path of the on-disk PNG this annotation session originated from.
+    /// `nil` means "no auto-save target" — the user opened a transient image
+    /// (rare path, kept for safety).
+    private let savedPath: String?
     private var canvas: AnnotationCanvasView!
     private var currentTool: AnnotationTool = .arrow
     private var currentColor: NSColor = .systemRed
@@ -123,10 +132,18 @@ private final class AnnotationViewController: NSViewController {
     private var toolButtons: [AnnotationTool: NSButton] = [:]
     private var colorButtons: [ColorSwatchButton] = []
     private weak var customColorWell: CustomColorPickerButton?
+    /// Window-scoped key monitor token so ⌘C (and a few other shortcuts) can
+    /// fire without stealing keystrokes from text-annotation editing inside
+    /// child windows. Installed in `viewDidAppear`, removed on disappear.
+    private var keyMonitor: Any?
+    /// Notification observer for our window's `willClose` event so we can
+    /// flush the flattened PNG back to disk before the window goes away.
+    private var willCloseObserver: NSObjectProtocol?
 
-    init(image: NSImage, canvasSize: NSSize) {
+    init(image: NSImage, canvasSize: NSSize, savedPath: String? = nil) {
         self.image = image
         self.canvasSize = canvasSize
+        self.savedPath = savedPath
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -170,6 +187,66 @@ private final class AnnotationViewController: NSViewController {
         self.view = root
         updateToolSelection()
         updateColorSelection()
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        installKeyMonitorIfNeeded()
+        installWillCloseObserverIfNeeded()
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        if let token = keyMonitor {
+            NSEvent.removeMonitor(token)
+            keyMonitor = nil
+        }
+        if let token = willCloseObserver {
+            NotificationCenter.default.removeObserver(token)
+            willCloseObserver = nil
+        }
+    }
+
+    /// Subscribe to our window's `willClose` notification so we can flush
+    /// the flattened PNG to disk before the window goes away. Using the
+    /// notification rather than `windowShouldClose` keeps the close action
+    /// non-cancellable from the user's perspective: edits always land.
+    private func installWillCloseObserverIfNeeded() {
+        guard willCloseObserver == nil, let win = view.window else { return }
+        willCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: win,
+            queue: .main
+        ) { [weak self] _ in
+            self?.flushToSourceFile()
+        }
+    }
+
+    /// Watch local key events while this view is on-screen so users can hit
+    /// ⌘C to copy the annotated PNG. NSButton only supports one `keyEquivalent`
+    /// each (Copy already uses Return as the default-action accelerator), so
+    /// we route the conventional ⌘C through a monitor instead of stealing the
+    /// Return binding. The monitor scopes itself to events whose window is
+    /// ours so other apps' shortcuts are unaffected.
+    private func installKeyMonitorIfNeeded() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self,
+                  let win = self.view.window,
+                  event.window === win else { return event }
+            // Ignore the shortcut while a text editor is first responder so
+            // ⌘C inside an annotation-text field still copies the selected
+            // characters instead of the whole image.
+            if let fr = win.firstResponder, fr is NSText {
+                return event
+            }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "c" {
+                self.copyToClipboard()
+                return nil
+            }
+            return event
+        }
     }
 
     private func makeToolbar() -> NSView {
@@ -271,18 +348,13 @@ private final class AnnotationViewController: NSViewController {
                                            target: self,
                                            action: #selector(recognizeText))
         let copyBtn = Self.makeActionButton(symbol: "doc.on.doc",
-                                            label: "Copy to Clipboard (↩)",
+                                            label: "Copy to Clipboard (⌘C / ↩)",
                                             target: self,
                                             action: #selector(copyToClipboard),
                                             tint: .controlAccentColor)
         copyBtn.keyEquivalent = "\r"
-        let saveBtn = Self.makeActionButton(symbol: "square.and.arrow.down",
-                                            label: "Save…",
-                                            target: self,
-                                            action: #selector(saveAs))
         actionsStack.addArrangedSubview(ocrBtn)
         actionsStack.addArrangedSubview(copyBtn)
-        actionsStack.addArrangedSubview(saveBtn)
         actionsStack.addArrangedSubview(NSView()) // tail spacer so the row stays left-aligned
 
         bar.addSubview(toolsStack)
@@ -436,26 +508,28 @@ private final class AnnotationViewController: NSViewController {
         }
     }
 
-    @objc private func saveAs() {
-        guard let data = canvas.flattenedPNG() else { NSSound.beep(); return }
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.png]
-        panel.nameFieldStringValue = "Annotated Screenshot.png"
-        panel.canCreateDirectories = true
-        NSApp.activate()
-        panel.begin { [weak self] resp in
-            guard resp == .OK, let url = panel.url else { return }
-            do {
-                try data.write(to: url)
-                // Also copy to clipboard for convenience, no HUD.
-                CaptureOutput.shared.deliver(pngData: data, showThumbnail: false)
-                self?.view.window?.close()
-            } catch {
-                let alert = NSAlert()
-                alert.messageText = "Couldn’t save image"
-                alert.informativeText = error.localizedDescription
-                alert.runModal()
-            }
+    /// Persist the flattened PNG back to `savedPath`, overwriting the source
+    /// file the annotation session started from. Returns `true` on success.
+    /// Called on window close; does **not** mutate the canvas, so undo / redo
+    /// stacks remain intact in case the same window is re-opened.
+    @discardableResult
+    private func flushToSourceFile() -> Bool {
+        guard let path = savedPath else { return false }
+        guard let data = canvas.flattenedPNG() else { return false }
+        // Skip the write when the user opened the annotator and closed it
+        // without doing anything — saves a needless I/O roundtrip and keeps
+        // the file's mtime stable for sync clients.
+        guard canvas.hasUserEdits else { return false }
+        let url = URL(fileURLWithPath: path)
+        do {
+            try data.write(to: url, options: .atomic)
+            // Drop any cached thumbnails so the popover row re-renders with
+            // the new pixels next time it appears.
+            ThumbnailCache.shared.invalidate(path: path)
+            return true
+        } catch {
+            print("Annotation auto-save failed: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -485,6 +559,13 @@ private final class AnnotationCanvasView: NSView {
     private var current: Annotation?
     private var undoStack: [Snapshot] = []
     private var redoStack: [Snapshot] = []
+    /// Sticky flag flipped to `true` the first time the user mutates the
+    /// canvas (adds an annotation, crops, applies a border-blur action, ...).
+    /// Used by the controller's auto-save to skip writes when the window was
+    /// opened and closed without any real edits. Doesn't reset on undo so
+    /// "edit → undo → close" still considers the user to have touched the
+    /// document; the resulting PNG bytes match the original anyway.
+    private(set) var hasUserEdits: Bool = false
     /// Cached gaussian-blurred copy of the source image, used by the blur
     /// annotation tool. Recomputed lazily after each crop because the
     /// underlying pixels change.
@@ -529,6 +610,7 @@ private final class AnnotationCanvasView: NSView {
     private func performMutation(_ change: () -> Void) {
         undoStack.append(currentSnapshot)
         redoStack.removeAll()
+        hasUserEdits = true
         change()
         invalidateIntrinsicContentSize()
         needsDisplay = true
@@ -685,12 +767,15 @@ private final class AnnotationCanvasView: NSView {
         }
         NSGraphicsContext.current = ctx
 
-        // Match `makeFlattenedRep`'s Y-flip so the resulting NSImage renders
-        // upright when drawn back into the flipped canvas. Without this each
-        // Border Blur invocation inverts the screenshot vertically.
+        // No CTM Y-flip here: `bakedImage()` returns pixels in natural
+        // orientation, and `NSImage.draw(in:)` does *not* compensate for a
+        // flipped CTM (it queries `NSGraphicsContext.current.isFlipped`,
+        // which stays false). Drawing through a Y-flipped CTM would invert
+        // the screenshot in bitmap memory each invocation. Since this pass
+        // contains no annotation drawing in canvas-space coords (only
+        // image composition + a drop shadow), keeping the standard CG
+        // (Y-up) orientation produces correctly-oriented output.
         let cg = ctx.cgContext
-        cg.translateBy(x: 0, y: newSize.height)
-        cg.scaleBy(x: 1, y: -1)
 
         // 1. Backdrop: a heavily-blurred copy of the baked image scaled to
         //    fill the (same-aspect) canvas. Same aspect means a simple
@@ -706,19 +791,19 @@ private final class AnnotationCanvasView: NSView {
         }
 
         // 2. Subtle drop shadow underneath the screenshot for a floating feel.
-        //    Shadow offset is in the (now Y-flipped) context, so a positive
-        //    Y component drops the shadow toward the visible bottom edge.
+        //    Shadow offset is in CTM (Y-up) space here, so a *negative* Y
+        //    component drops the shadow toward the visible bottom edge.
         //    The torn variant uses a softer shadow because it only has the
         //    small inset band to render into.
         let shadow = NSShadow()
         if torn {
             shadow.shadowColor = NSColor.black.withAlphaComponent(0.22)
             shadow.shadowBlurRadius = max(4, referenceInset * 0.35)
-            shadow.shadowOffset = NSSize(width: 0, height: max(2, referenceInset * 0.10))
+            shadow.shadowOffset = NSSize(width: 0, height: -max(2, referenceInset * 0.10))
         } else {
             shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
             shadow.shadowBlurRadius = max(8, referenceInset * 0.4)
-            shadow.shadowOffset = NSSize(width: 0, height: max(4, referenceInset * 0.12))
+            shadow.shadowOffset = NSSize(width: 0, height: -max(4, referenceInset * 0.12))
         }
         shadow.set()
 
@@ -882,14 +967,23 @@ private final class AnnotationCanvasView: NSView {
         guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
         NSGraphicsContext.current = ctx
 
-        // The bitmap context is unflipped. Annotations were recorded in the
-        // canvas's flipped (top-left origin) space, so apply a Y-flip transform
-        // before drawing so what the user saw is what they export.
+        // 1) Draw the base image in the *unflipped* CG context. Going through
+        // `NSImage.draw(in:)` in a CTM-flipped context inverts the image's
+        // own pixels in bitmap memory (it doesn't compensate for the CTM —
+        // it queries `NSGraphicsContext.current.isFlipped`, which stays
+        // false here), so the resulting PNG re-opens upside-down. Drawing
+        // first, before any CTM transform, keeps the source pixels right-
+        // side up on disk.
+        image.draw(in: NSRect(origin: .zero, size: pixelSize))
+
+        // 2) Annotations were recorded in the canvas's flipped (top-left
+        // origin) space. Apply the Y-flip *only* for the annotation pass so
+        // the drawing math lines up with what the user saw on-screen,
+        // without contaminating the image we just rendered above.
         let cg = ctx.cgContext
+        cg.saveGState()
         cg.translateBy(x: 0, y: pixelSize.height)
         cg.scaleBy(x: 1, y: -1)
-
-        image.draw(in: NSRect(origin: .zero, size: pixelSize))
 
         // Scale annotations from the on-screen canvas size back to native px.
         let sx = pixelSize.width / displaySize.width
@@ -897,6 +991,7 @@ private final class AnnotationCanvasView: NSView {
         for ann in annotations where ann.tool != .crop {
             drawAnnotation(ann, scaleX: sx, scaleY: sy)
         }
+        cg.restoreGState()
         return rep
     }
 
