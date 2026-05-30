@@ -11,83 +11,77 @@ struct ClipboardHistoryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                Text("Clipboard History")
-                    .font(.headline)
-                Spacer()
-                Button(action: { openSettings() }) {
-                    Image(systemName: "gear")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Settings")
-
-                Button(action: { clipboardManager.clearHistory() }) {
-                    Image(systemName: "trash")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Clear All")
-
-                Button(action: { NSApp.terminate(nil) }) {
-                    Image(systemName: "power")
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Quit")
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
-
-            // Category picker: split the popover into Clipboard / Screenshots
-            // so screenshots don't dominate the list when there are many.
-            Picker("", selection: $clipboardManager.selectedCategory) {
-                ForEach(HistoryCategory.allCases) { c in
-                    Label(c.title, systemImage: c.symbol).tag(c)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 12)
-            .padding(.bottom, 8)
-
-            // Search bar
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("Search clipboard history...", text: $clipboardManager.searchText)
-                    .textFieldStyle(.plain)
-                if !clipboardManager.searchText.isEmpty {
-                    Button(action: { clipboardManager.searchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+            // ---- Top strata (search + tabs + chips) ----
+            VStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("Search…", text: $clipboardManager.searchText)
+                            .textFieldStyle(.plain)
+                        if !clipboardManager.searchText.isEmpty {
+                            Button(action: { clipboardManager.searchText = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.quaternary.opacity(0.5))
+                    )
+
+                    Menu {
+                        Button("Settings…") { openSettings() }
+                        Divider()
+                        Button("Clear History", role: .destructive) {
+                            clipboardManager.clearHistory()
+                        }
+                        Divider()
+                        Button("Quit ClipboardKit") { NSApp.terminate(nil) }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22, height: 22)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 28)
+                    .help("More")
+                }
+
+                Picker("", selection: $clipboardManager.selectedCategory) {
+                    ForEach(HistoryCategory.allCases) { c in
+                        Label(c.title, systemImage: c.symbol).tag(c)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                // Type-filter chips appear only on the Clipboard tab.
+                // Reserve a fixed slot so switching tabs doesn't jump the
+                // list's vertical position.
+                if clipboardManager.selectedCategory == .clipboard {
+                    TypeFilterChipRow()
                 }
             }
-            .padding(8)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(8)
             .padding(.horizontal, 12)
+            .padding(.top, 10)
             .padding(.bottom, 8)
+            .background(VisualEffectBackground(material: .headerView, blendingMode: .behindWindow))
 
-            Divider()
-
-            // History list is its own view so it only re-evaluates when
-            // `filteredHistory` changes, not whenever the parent body runs
-            // (e.g. after `searchText` typing while debounced).
+            // ---- List ----
             HistoryListView()
+                .background(Color(NSColor.textBackgroundColor))
 
-            Divider()
-
-            // Footer is its own view so the parent body doesn't have to
-            // observe `history.count` directly. The footer still updates on
-            // every capture, but it's a single Text — cheap.
+            // ---- Footer strata ----
             HistoryFooterView()
+                .background(VisualEffectBackground(material: .titlebar, blendingMode: .withinWindow))
         }
-        .frame(width: 350, height: 500)
+        .frame(width: 460, height: 640)
         .overlay(
             // Accent ring while a drag is hovering over the popover; lets
             // the user know this surface accepts drops without taking up
@@ -191,36 +185,48 @@ struct HistoryListView: View {
     @EnvironmentObject var clipboardManager: ClipboardManager
 
     var body: some View {
-        if clipboardManager.filteredHistory.isEmpty {
-            VStack {
-                Spacer()
-                VStack(spacing: 8) {
-                    Image(systemName: clipboardManager.selectedCategory.symbol)
-                        .font(.system(size: 40))
-                        .foregroundColor(.secondary)
-                    Text(emptyMessage)
-                        .foregroundColor(.secondary)
-                    Text(emptyHint)
-                        .font(.caption)
-                        .foregroundColor(.secondary.opacity(0.7))
-                }
-                Spacer()
+        // Snippets live in a parallel data store and have their own row
+        // chrome / context menu; route them to a dedicated subview rather
+        // than trying to coerce them through `ClipboardItemRow`.
+        if clipboardManager.selectedCategory == .snippets {
+            SnippetsListView()
+        } else if clipboardManager.filteredHistory.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: clipboardManager.selectedCategory.symbol)
+                    .font(.system(size: 40))
+                    .foregroundColor(.secondary)
+                Text(emptyMessage)
+                    .foregroundColor(.secondary)
+                Text(emptyHint)
+                    .font(.caption)
+                    .foregroundColor(.secondary.opacity(0.7))
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 2) {
-                        ForEach(clipboardManager.filteredHistory) { item in
-                            // `.equatable()` lets SwiftUI skip body re-eval
-                            // when `item` is unchanged — even if the parent
-                            // re-renders for an unrelated reason (e.g. another
-                            // capture published `history`).
-                            ClipboardItemRow(
-                                item: item,
-                                isKeyboardSelected: item.id == clipboardManager.keyboardSelectedID
-                            )
-                            .equatable()
-                            .id(item.id)
+                    LazyVStack(spacing: 2, pinnedViews: [.sectionHeaders]) {
+                        // Section the list by recency (and pull pins to the
+                        // very top). Headers give the user temporal anchors
+                        // so a long scroll doesn't feel like one undifferentiated
+                        // wall of rows. Quick-paste numbers still come from
+                        // the flat-list index so ⌘1–⌘9 maps to what's actually
+                        // visible top-to-bottom.
+                        let indexed = Array(clipboardManager.filteredHistory.enumerated())
+                        ForEach(HistorySectionBucket.bucketize(indexed)) { section in
+                            Section {
+                                ForEach(section.entries, id: \.item.id) { entry in
+                                    ClipboardItemRow(
+                                        item: entry.item,
+                                        isKeyboardSelected: entry.item.id == clipboardManager.keyboardSelectedID,
+                                        quickPasteNumber: entry.index < 9 ? entry.index + 1 : nil
+                                    )
+                                    .equatable()
+                                    .id(entry.item.id)
+                                }
+                            } header: {
+                                SectionHeader(title: section.title, count: section.entries.count)
+                            }
                         }
                     }
                     .padding(.horizontal, 8)
@@ -244,6 +250,7 @@ struct HistoryListView: View {
         switch clipboardManager.selectedCategory {
         case .clipboard: return "No clipboard history yet"
         case .screenshots: return "No screenshots yet"
+        case .snippets: return "No snippets yet"
         }
     }
 
@@ -251,6 +258,61 @@ struct HistoryListView: View {
         switch clipboardManager.selectedCategory {
         case .clipboard: return "Copy something to get started"
         case .screenshots: return "Press ⌘⇧S to take one"
+        case .snippets: return "Save text from history or create a new one"
+        }
+    }
+}
+
+/// Horizontal row of single-tap chips that narrows the clipboard tab by
+/// type. Lives in its own view so the parent body doesn't have to observe
+/// the chip selection — only this view does, and the change still triggers
+/// the filter pipeline through the `@Published` on the manager.
+struct TypeFilterChipRow: View {
+    @EnvironmentObject var clipboardManager: ClipboardManager
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(TypeFilter.allCases) { filter in
+                    Chip(filter: filter,
+                         isSelected: clipboardManager.selectedTypeFilter == filter,
+                         action: { clipboardManager.selectedTypeFilter = filter })
+                }
+            }
+        }
+    }
+
+    private struct Chip: View {
+        let filter: TypeFilter
+        let isSelected: Bool
+        let action: () -> Void
+
+        var body: some View {
+            Button(action: action) {
+                HStack(spacing: 4) {
+                    Image(systemName: filter.symbol)
+                        .font(.system(size: 10, weight: .medium))
+                    Text(filter.title)
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule().fill(
+                        isSelected
+                            ? AnyShapeStyle(.tint.opacity(0.18))
+                            : AnyShapeStyle(.quaternary.opacity(0.6))
+                    )
+                )
+                .overlay(
+                    Capsule().strokeBorder(
+                        isSelected ? Color.accentColor.opacity(0.6) : Color.clear,
+                        lineWidth: 1
+                    )
+                )
+                .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+            }
+            .buttonStyle(.plain)
         }
     }
 }
@@ -262,9 +324,16 @@ struct HistoryFooterView: View {
 
     var body: some View {
         HStack {
-            Text("\(clipboardManager.filteredHistory.count) / \(clipboardManager.history.count) items")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            switch clipboardManager.selectedCategory {
+            case .clipboard, .screenshots:
+                Text("\(clipboardManager.filteredHistory.count) / \(clipboardManager.history.count) items")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            case .snippets:
+                Text("\(clipboardManager.filteredSnippets.count) / \(clipboardManager.snippets.count) snippets")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
             Spacer()
             Text("⌘⇧V to toggle")
                 .font(.caption)
@@ -278,6 +347,10 @@ struct HistoryFooterView: View {
 struct ClipboardItemRow: View, Equatable {
     let item: ClipboardItem
     let isKeyboardSelected: Bool
+    /// 1-based shortcut number (⌘N) displayed as a tiny leading badge so
+    /// users know which row corresponds to ⌘1–⌘9. `nil` for rows beyond
+    /// the ninth (we only register that many digits).
+    let quickPasteNumber: Int?
     @EnvironmentObject private var manager: ClipboardManager
     @State private var isHovered = false
     /// Snapshot of "5 minutes ago" computed once per row presentation.
@@ -300,6 +373,7 @@ struct ClipboardItemRow: View, Equatable {
         lhs.item == rhs.item
             && lhs.item.isPinned == rhs.item.isPinned
             && lhs.isKeyboardSelected == rhs.isKeyboardSelected
+            && lhs.quickPasteNumber == rhs.quickPasteNumber
     }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
@@ -312,13 +386,21 @@ struct ClipboardItemRow: View, Equatable {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            // Type icon
-            itemIcon
-                .frame(width: 24)
-                .foregroundColor(.secondary)
+            // Leading column: ⌘N quick-paste pill for the first nine rows,
+            // type icon otherwise. The pill is sized to its own intrinsic
+            // dimensions, then placed in a 28pt slot so the row content
+            // start column stays stable as the user scrolls past row nine.
+            ZStack {
+                if let n = quickPasteNumber {
+                    quickPasteBadge(n)
+                } else {
+                    itemIcon
+                }
+            }
+            .frame(width: 28, alignment: .center)
 
             // Content
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 if item.contentType == .image, let fileName = item.fileName {
                     imagePreview(path: fileName)
                 } else if item.contentType == .fileURL, let paths = item.filePaths, !paths.isEmpty {
@@ -327,7 +409,7 @@ struct ClipboardItemRow: View, Equatable {
                             HStack(spacing: 4) {
                                 fileIcon(for: path)
                                 Text((path as NSString).lastPathComponent)
-                                    .font(.system(size: 12))
+                                    .font(.system(size: 13, weight: .medium))
                                     .lineLimit(1)
                             }
                         }
@@ -341,17 +423,20 @@ struct ClipboardItemRow: View, Equatable {
                     linkPreviewCard(preview: preview, fallbackText: item.previewText)
                 } else {
                     Text(item.previewText)
-                        .font(.system(size: 12))
+                        .font(.system(size: 13))
                         .lineLimit(3)
                         .foregroundColor(.primary)
                 }
 
-                HStack {
+                HStack(spacing: 6) {
                     if item.isPinned {
                         Image(systemName: "pin.fill")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(.accentColor)
                             .help("Pinned")
+                    }
+                    if let bundleID = item.sourceBundleID {
+                        SourceAppBadge(bundleID: bundleID)
                     }
                     Text(relativeTimestamp)
                         .font(.caption2)
@@ -421,7 +506,10 @@ struct ClipboardItemRow: View, Equatable {
         .cornerRadius(6)
         .contentShape(Rectangle())
         .onTapGesture {
-            manager.pasteItem(item)
+            // Read the modifier state at the moment of click so ⌥/⇧ select a
+            // paste transform (plain text / trimmed). `NSEvent.modifierFlags`
+            // reflects the hardware state and is set during the click event.
+            manager.pasteItem(item, transform: PasteTransform.from(modifiers: NSEvent.modifierFlags))
         }
         .onHover { hovering in
             isHovered = hovering
@@ -429,15 +517,45 @@ struct ClipboardItemRow: View, Equatable {
         .onDrag { dragProvider() }
         .contextMenu {
             Button("Paste") { manager.pasteItem(item) }
-            Button("Paste as Plain Text") { manager.pasteItem(item, asPlainText: true) }
+            Button("Paste as Plain Text") { manager.pasteItem(item, transform: .plainText) }
                 .keyboardShortcut(.return, modifiers: [.option])
                 .disabled(item.contentType == .image || item.contentType == .fileURL)
+            Button("Paste Trimmed") { manager.pasteItem(item, transform: .trimmed) }
+                .keyboardShortcut(.return, modifiers: [.shift])
+                .disabled(item.contentType == .image || item.contentType == .fileURL)
+            if item.contentType == .text || item.contentType == .richText {
+                Menu("Paste as…") {
+                    Button("lowercase")   { manager.pasteItem(item, transform: .lowercase) }
+                        .keyboardShortcut(.return, modifiers: [.control])
+                    Button("UPPERCASE")   { manager.pasteItem(item, transform: .uppercase) }
+                        .keyboardShortcut(.return, modifiers: [.control, .shift])
+                    Button("Title Case")  { manager.pasteItem(item, transform: .titleCase) }
+                        .keyboardShortcut(.return, modifiers: [.control, .option])
+                }
+                Divider()
+                Button("Save as Snippet") { manager.saveItemAsSnippet(item) }
+                if let actions = UrlActions.detect(in: item.textContent ?? ""), !actions.isEmpty {
+                    Divider()
+                    ForEach(actions) { action in
+                        Button(action.label) { action.perform() }
+                    }
+                }
+            }
             if item.contentType == .image, let fileName = item.fileName {
                 Divider()
                 Button("Annotate…") { Self.openAnnotator(path: fileName) }
                 Button("Recognize Text (OCR)") { Self.recognizeText(path: fileName) }
                 Button("Quick Look") { Self.togglePreview(path: fileName) }
                 Button("Reveal in Seeker") { Self.revealInSeeker(path: fileName) }
+            }
+            if item.contentType == .fileURL, let paths = item.filePaths, !paths.isEmpty {
+                Divider()
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting(paths.map { URL(fileURLWithPath: $0) })
+                }
+                Button("Open") {
+                    for p in paths { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
+                }
             }
             Divider()
             Button(item.isPinned ? "Unpin" : "Pin to top") { manager.togglePin(item) }
@@ -452,8 +570,8 @@ struct ClipboardItemRow: View, Equatable {
     }
 
     private var rowBackground: Color {
-        if isKeyboardSelected { return Color.accentColor.opacity(0.22) }
-        if isHovered { return Color.accentColor.opacity(0.10) }
+        if isKeyboardSelected { return Color.accentColor.opacity(0.12) }
+        if isHovered { return Color.primary.opacity(0.06) }
         return Color.clear
     }
 
@@ -484,18 +602,65 @@ struct ClipboardItemRow: View, Equatable {
         }
     }
 
+    /// Colored, type-specific icon for the leading column. The tint isn't
+    /// load-bearing — type is also conveyed via row content — but a quick
+    /// glance at the column makes it easy to skim "where's the file I just
+    /// copied?" without reading every preview.
     @ViewBuilder
     private var itemIcon: some View {
         switch item.contentType {
         case .text:
-            Image(systemName: "doc.text")
+            // URL items get a link-colored globe so they pop out of a
+            // wall of plain text.
+            if let body = item.textContent, looksLikeURL(body) {
+                Image(systemName: "link")
+                    .foregroundStyle(Color.blue)
+            } else {
+                Image(systemName: "doc.text")
+                    .foregroundStyle(.secondary)
+            }
         case .richText:
             Image(systemName: "doc.richtext")
+                .foregroundStyle(Color.purple)
         case .image:
             Image(systemName: "photo")
+                .foregroundStyle(Color.pink)
         case .fileURL:
-            Image(systemName: "folder")
+            Image(systemName: "folder.fill")
+                .foregroundStyle(Color.orange)
         }
+    }
+
+    /// Cheap URL sniff — `TypeFilter.isLink` is internal; reproduce its
+    /// gist inline so the row doesn't have to reach into the manager.
+    private func looksLikeURL(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !t.contains(" "), !t.contains("\n"), t.count <= 2048 else { return false }
+        if let url = URL(string: t),
+           let scheme = url.scheme?.lowercased(),
+           ["http", "https", "ftp", "mailto", "tel", "file"].contains(scheme) {
+            return true
+        }
+        return false
+    }
+
+    /// Subtle "⌘N" pill rendered in the leading column for the first
+    /// nine rows. Filled with a tinted background and accent-colored
+    /// glyph so it reads as a hint, not a status badge.
+    @ViewBuilder
+    private func quickPasteBadge(_ n: Int) -> some View {
+        Text("⌘\(n)")
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(
+                Capsule().fill(.quaternary.opacity(0.7))
+            )
+            .help("Press ⌘\(n) to paste this item")
     }
 
     @ViewBuilder

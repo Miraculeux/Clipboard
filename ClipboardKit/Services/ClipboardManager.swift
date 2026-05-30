@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import Combine
 import Carbon.HIToolbox
+import CryptoKit
 
 class ClipboardManager: ObservableObject, @unchecked Sendable {
     nonisolated(unsafe) static let shared = ClipboardManager()
@@ -9,12 +10,25 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
     @Published var history: [ClipboardItem] = []
     @Published var searchText: String = ""
     @Published var selectedCategory: HistoryCategory = .clipboard
+    /// Secondary filter applied on top of `selectedCategory == .clipboard`.
+    /// Lets the user narrow the clipboard tab down to text / links / files
+    /// / colors without changing what's tracked.
+    @Published var selectedTypeFilter: TypeFilter = .all
     /// Item currently highlighted by keyboard navigation in the popover.
     @Published var keyboardSelectedID: ClipboardItem.ID?
     /// Cached, debounced filtered view of `history`. Recomputed only when
     /// `history`, `searchText`, or `selectedCategory` actually changes
     /// (debounced for typing).
     @Published private(set) var filteredHistory: [ClipboardItem] = []
+
+    /// User-managed snippet library. Independent of `history` — never
+    /// auto-captured, never trimmed.
+    @Published var snippets: [Snippet] = []
+    /// Cached, debounced filtered view of `snippets`.
+    @Published private(set) var filteredSnippets: [Snippet] = []
+    /// Snippet highlighted by keyboard navigation while the Snippets tab is
+    /// active in the popover.
+    @Published var keyboardSelectedSnippetID: Snippet.ID?
 
     private var timer: Timer?
     private var lastChangeCount: Int = 0
@@ -31,16 +45,21 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
     private static let saveDebounce: TimeInterval = 0.5
 
     private var filterCancellable: AnyCancellable?
+    private var snippetFilterCancellable: AnyCancellable?
 
     /// SQLite-backed history persistence. Replaces the previous
     /// `history.json` blob. Reads/writes happen on the store's internal
     /// queue; we just hand it snapshots.
     private let store = HistoryStore.shared
+    /// Snippet library persistence.
+    private let snippetStore = SnippetStore.shared
+    private var pendingSnippetSave: DispatchWorkItem?
 
     private init() {
         lastChangeCount = pasteboard.changeCount
         setupFilterPipeline()
         loadHistoryAsync()
+        loadSnippetsAsync()
     }
 
     // Threshold above which a text item's full body is stored on disk and only
@@ -119,6 +138,15 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
     }
 
     private func captureClipboard() {
+        // Snapshot the frontmost app *now*, before any async hop: by the time
+        // a background queue gets to assemble the item the user may have
+        // switched focus, and we want the app they were *in* when they hit
+        // ⌘C. Filter ourselves out so a paste-loop / restore-snapshot can't
+        // mislabel an item as coming from ClipboardKit.
+        let frontBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        let ourBundle = Bundle.main.bundleIdentifier
+        let sourceBundleID: String? = (frontBundle == ourBundle) ? nil : frontBundle
+
         // Check for file URLs first (Finder copy)
         // Files are detected via the pasteboard types that Finder sets
         let hasFiles = pasteboard.types?.contains(where: { $0 == Self.fileURLType || $0 == Self.multiFileType }) ?? false
@@ -155,7 +183,8 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                         textContent: captured.joined(separator: "\n"),
                         fileName: nil,
                         filePaths: captured,
-                        originalSize: totalSize
+                        originalSize: totalSize,
+                        sourceBundleID: sourceBundleID
                     )
                     self?.addItem(item)
                 }
@@ -172,7 +201,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             let isAlreadyPNG = pngData != nil
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
-                let item = self.saveImageItem(data: imageData, isAlreadyPNG: isAlreadyPNG)
+                let item = self.saveImageItem(data: imageData, isAlreadyPNG: isAlreadyPNG, sourceBundleID: sourceBundleID)
                 self.addItem(item)
             }
             return
@@ -197,7 +226,8 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                     textContent: preview,
                     fileName: sidecarPath,
                     filePaths: nil,
-                    originalSize: originalSize
+                    originalSize: originalSize,
+                    sourceBundleID: sourceBundleID
                 )
                 self.addItem(item)
             }
@@ -217,7 +247,8 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                     textContent: preview,
                     fileName: sidecar,
                     filePaths: nil,
-                    originalSize: originalSize
+                    originalSize: originalSize,
+                    sourceBundleID: sourceBundleID
                 )
                 self.addItem(item)
             }
@@ -270,7 +301,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func saveImageItem(data: Data, isAlreadyPNG: Bool) -> ClipboardItem {
+    private func saveImageItem(data: Data, isAlreadyPNG: Bool, sourceBundleID: String? = nil) -> ClipboardItem {
         let fileName = UUID().uuidString + ".png"
 
         // Always store images in the user-chosen storage location.
@@ -294,6 +325,12 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             try? data.write(to: fileURL)
         }
 
+        // Cheap hex SHA256 of the raw pasteboard payload. Used downstream
+        // by the dedupe path to recognize "the same screenshot copied
+        // twice" without re-reading the file from disk.
+        let digest = SHA256.hash(data: data)
+        let hash = digest.map { String(format: "%02x", $0) }.joined()
+
         return ClipboardItem(
             id: UUID(),
             timestamp: Date(),
@@ -301,7 +338,9 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             textContent: nil,
             fileName: fileURL.path,
             filePaths: nil,
-            originalSize: data.count
+            originalSize: data.count,
+            sourceBundleID: sourceBundleID,
+            contentHash: hash
         )
     }
 
@@ -367,39 +406,25 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
-            // Remove duplicate. Short-circuit on `originalSize` (cheap Int compare)
-            // before doing the potentially expensive String/Array equality.
-            // Pinned duplicates are preserved (the user explicitly wanted them
-            // around) — we just won't add a second copy below.
-            if item.contentType == .fileURL, let paths = item.filePaths {
-                let count = paths.count
-                if let existing = self.history.first(where: {
-                    $0.contentType == .fileURL
-                        && ($0.filePaths?.count ?? -1) == count
-                        && $0.filePaths == paths
-                }), existing.isPinned {
+            // Dedupe across the WHOLE history (not just the immediately
+            // previous row): re-copying an item that's already there should
+            // float the existing version up rather than leaving the old row
+            // dangling. The user can turn this off in Settings if they need
+            // a strict append-only history (e.g. for audit purposes).
+            //
+            // Pinned items are exempt from removal — we silently skip the
+            // insert so the user's curated pin doesn't get replaced with a
+            // fresh, unpinned copy of itself.
+            if self.settings.deduplicateEntries, let matcher = Self.duplicateMatcher(for: item) {
+                if let existing = self.history.first(where: matcher), existing.isPinned {
                     return
                 }
-                self.history.removeAll {
-                    $0.contentType == .fileURL
-                        && ($0.filePaths?.count ?? -1) == count
-                        && $0.filePaths == paths
+                // Cleanup any sidecar files on removed duplicates so we don't
+                // leak orphans on disk (image PNGs especially).
+                for dup in self.history where matcher(dup) {
+                    Self.cleanupFileSync(for: dup)
                 }
-            } else if let text = item.textContent {
-                let size = item.originalSize
-                let type = item.contentType
-                if let existing = self.history.first(where: {
-                    $0.contentType == type
-                        && $0.originalSize == size
-                        && $0.textContent == text
-                }), existing.isPinned {
-                    return
-                }
-                self.history.removeAll {
-                    $0.contentType == type
-                        && $0.originalSize == size
-                        && $0.textContent == text
-                }
+                self.history.removeAll(where: matcher)
             }
 
             // The new item we'll actually insert. We may augment it with a
@@ -469,7 +494,21 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
     }
 
     func pasteItem(_ item: ClipboardItem, asPlainText: Bool = false) {
-        let forcePlain = asPlainText || settings.alwaysPastePlainText
+        pasteItem(item, transform: asPlainText ? .plainText : .none)
+    }
+
+    /// Paste `item` into the previously-focused app, optionally rewriting any
+    /// text payload before it hits the pasteboard. Image and file items
+    /// ignore the transform.
+    func pasteItem(_ item: ClipboardItem, transform: PasteTransform) {
+        // `alwaysPastePlainText` is a settings-level baseline; an explicit
+        // `.none` from a caller is upgraded to `.plainText` so the global
+        // toggle still wins. `.trimmed` already implies plain text.
+        let effective: PasteTransform = {
+            if transform != .none { return transform }
+            return settings.alwaysPastePlainText ? .plainText : .none
+        }()
+        let forcePlain = effective.forcesPlainText
         // Snapshot what the user had on the clipboard BEFORE we overwrite it
         // with our own payload. If `restoreClipboardAfterPaste` is on we put
         // these contents back after the simulated paste, so the user's
@@ -503,8 +542,10 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                 guard let self = self else { return }
                 if sidecarPath.hasSuffix(".rtf"),
                    let rtfData = try? Data(contentsOf: url) {
-                    let plain = NSAttributedString(rtf: rtfData, documentAttributes: nil)?
-                        .string ?? (item.textContent ?? "")
+                    let plain = effective.apply(
+                        NSAttributedString(rtf: rtfData, documentAttributes: nil)?
+                            .string ?? (item.textContent ?? "")
+                    )
                     DispatchQueue.main.async {
                         self.pasteboard.clearContents()
                         if forcePlain {
@@ -518,8 +559,10 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                     return
                 }
                 // Legacy .txt sidecar — only the plain body remains on disk.
-                let plain = (try? String(contentsOf: url, encoding: .utf8))
-                    ?? (item.textContent ?? "")
+                let plain = effective.apply(
+                    (try? String(contentsOf: url, encoding: .utf8))
+                        ?? (item.textContent ?? "")
+                )
                 DispatchQueue.main.async {
                     self.pasteboard.clearContents()
                     self.pasteboard.setString(plain, forType: .string)
@@ -533,7 +576,9 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         if item.contentType == .text, let sidecar = item.fileName {
             let url = URL(fileURLWithPath: sidecar)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let fullText = (try? String(contentsOf: url, encoding: .utf8)) ?? (item.textContent ?? "")
+                let fullText = effective.apply(
+                    (try? String(contentsOf: url, encoding: .utf8)) ?? (item.textContent ?? "")
+                )
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     self.pasteboard.clearContents()
@@ -548,7 +593,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         switch item.contentType {
         case .text, .richText:
             pasteboard.clearContents()
-            pasteboard.setString(item.textContent ?? "", forType: .string)
+            pasteboard.setString(effective.apply(item.textContent ?? ""), forType: .string)
         case .image:
             break // handled above
         case .fileURL:
@@ -569,6 +614,12 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         lastChangeCount = pasteboard.changeCount
         AppDelegate.shared.closePopoverAndRestoreFocus { [weak self] in
             self?.simulatePaste()
+            // Brief visual confirmation near the menu bar — feedback that
+            // the paste actually fired (the user just lost the popover, so
+            // a silent action looks like a no-op).
+            DispatchQueue.main.async {
+                ToastCenter.shared.show("Pasted")
+            }
             // Restore the snapshotted clipboard after a brief delay — long
             // enough for the receiving app to actually consume the paste
             // event. Without the delay, some apps (e.g. Slack web) read the
@@ -710,6 +761,43 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Build the predicate used to find existing rows that should collapse
+    /// into a newly-captured `incoming`. Returns `nil` for items that we
+    /// don't dedupe (e.g. an image without a hash, which would be a coding
+    /// bug — better to leave it alone than to collapse unrelated rows).
+    ///
+    /// Returning a free-standing closure keeps the dedup logic in one place
+    /// and lets the caller use it for both the "is the existing row pinned?"
+    /// lookup and the actual `removeAll`.
+    private static func duplicateMatcher(for incoming: ClipboardItem) -> ((ClipboardItem) -> Bool)? {
+        switch incoming.contentType {
+        case .fileURL:
+            guard let paths = incoming.filePaths else { return nil }
+            let count = paths.count
+            return { existing in
+                existing.contentType == .fileURL
+                    && (existing.filePaths?.count ?? -1) == count
+                    && existing.filePaths == paths
+            }
+        case .image:
+            // Image dedupe requires the SHA256 we computed at capture time.
+            // Without it we'd be guessing — bail.
+            guard let hash = incoming.contentHash else { return nil }
+            return { existing in
+                existing.contentType == .image && existing.contentHash == hash
+            }
+        case .text, .richText:
+            guard let text = incoming.textContent else { return nil }
+            let size = incoming.originalSize
+            let type = incoming.contentType
+            return { existing in
+                existing.contentType == type
+                    && existing.originalSize == size
+                    && existing.textContent == text
+            }
+        }
+    }
+
     // MARK: - Persistence (debounced, off-main)
 
     /// Coalesce many rapid mutations into a single background write.
@@ -775,16 +863,29 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             .removeDuplicates()
         let categoryStream = $selectedCategory
             .removeDuplicates()
+        let typeStream = $selectedTypeFilter
+            .removeDuplicates()
 
-        filterCancellable = Publishers.CombineLatest3(historyStream, queryStream, categoryStream)
+        filterCancellable = Publishers.CombineLatest4(historyStream, queryStream, categoryStream, typeStream)
             .receive(on: DispatchQueue.global(qos: .userInitiated))
-            .map { history, query, category -> [ClipboardItem] in
+            .map { history, query, category, typeFilter -> [ClipboardItem] in
+                // The snippets tab uses a different model; skip the history
+                // filter entirely when it's selected so we don't waste work.
+                guard category != .snippets else { return [] }
                 let categoryFiltered: [ClipboardItem]
                 switch category {
                 case .clipboard:
-                    categoryFiltered = history.filter { $0.contentType != .image }
+                    // Apply the chip filter only on the clipboard tab. The
+                    // screenshots tab is all-images by definition; further
+                    // narrowing would just yield "all or nothing".
+                    let base = history.filter { $0.contentType != .image }
+                    categoryFiltered = typeFilter == .all
+                        ? base
+                        : base.filter { typeFilter.matches($0) }
                 case .screenshots:
                     categoryFiltered = history.filter { $0.contentType == .image }
+                case .snippets:
+                    categoryFiltered = []
                 }
                 guard !query.isEmpty else { return categoryFiltered }
                 return categoryFiltered.filter {
@@ -793,14 +894,170 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             }
             .receive(on: DispatchQueue.main)
             .assign(to: \.filteredHistory, on: self)
+
+        // Parallel pipeline for the snippet library: only the search field is
+        // shared with the history view, so reuse `$searchText`. Filtering is
+        // cheap (snippet counts are tens, not thousands) — debounce only the
+        // query to match keystroke pacing.
+        let snippetStream = $snippets
+            .debounce(for: .milliseconds(40), scheduler: DispatchQueue.main)
+
+        snippetFilterCancellable = Publishers.CombineLatest(snippetStream, queryStream)
+            .map { snippets, query -> [Snippet] in
+                guard !query.isEmpty else { return snippets }
+                return snippets.filter {
+                    $0.displayTitle.range(of: query, options: .caseInsensitive) != nil
+                        || $0.content.range(of: query, options: .caseInsensitive) != nil
+                }
+            }
+            .receive(on: DispatchQueue.main)
+            .assign(to: \.filteredSnippets, on: self)
+    }
+
+    // MARK: - Snippet library
+
+    private func loadSnippetsAsync() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let loaded = self.snippetStore.loadAll()
+            guard !loaded.isEmpty else { return }
+            DispatchQueue.main.async {
+                self.snippets = loaded
+            }
+        }
+    }
+
+    func addSnippet(_ snippet: Snippet) {
+        snippets.insert(snippet, at: 0)
+        snippetStore.saveAll(snippets)
+    }
+
+    func updateSnippet(_ snippet: Snippet) {
+        guard let idx = snippets.firstIndex(where: { $0.id == snippet.id }) else { return }
+        var updated = snippet
+        updated.updatedAt = Date()
+        snippets[idx] = updated
+        snippetStore.saveAll(snippets)
+    }
+
+    func deleteSnippet(_ snippet: Snippet) {
+        snippets.removeAll { $0.id == snippet.id }
+        snippetStore.saveAll(snippets)
+    }
+
+    /// Promote a history item into the snippet library. Image and file items
+    /// are ignored — there's no useful text body to promote.
+    func saveItemAsSnippet(_ item: ClipboardItem) {
+        switch item.contentType {
+        case .text, .richText:
+            let body = item.textContent ?? ""
+            guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            addSnippet(Snippet(title: "", content: body))
+        case .image, .fileURL:
+            return
+        }
+    }
+
+    /// Paste a snippet just like a text history item. The snippet model
+    /// never has a sidecar or rich format, so the path is much simpler than
+    /// `pasteItem(_:transform:)`. Template placeholders (`{date}`,
+    /// `{clipboard}`, …) are expanded *before* the transform so case rules
+    /// apply to the final rendered string.
+    func pasteSnippet(_ snippet: Snippet, transform: PasteTransform = .none) {
+        let effective: PasteTransform = {
+            if transform != .none { return transform }
+            return settings.alwaysPastePlainText ? .plainText : .none
+        }()
+        let expanded = SnippetExpander.expand(snippet.content)
+        let body = effective.apply(expanded)
+        let restoreSnapshot: PasteboardSnapshot? =
+            settings.restoreClipboardAfterPaste ? snapshotPasteboard() : nil
+        pasteboard.clearContents()
+        pasteboard.setString(body, forType: .string)
+        finalizePasteAndSimulate(restore: restoreSnapshot)
+    }
+}
+
+/// Per-paste rewrite applied to text payloads. `none` is the default;
+/// `plainText` strips any RTF and writes only `public.utf8-plain-text`;
+/// `trimmed` is `plainText` plus a leading/trailing whitespace trim; the
+/// case-changing variants also imply plain text (formatting can't survive
+/// a string-level rewrite cleanly).
+enum PasteTransform: Sendable, Equatable, CaseIterable {
+    case none
+    case plainText
+    case trimmed
+    case lowercase
+    case uppercase
+    case titleCase
+
+    /// `true` when the receiver should be denied rich-text formatting.
+    var forcesPlainText: Bool { self != .none }
+
+    /// Human-readable label for menus / settings.
+    var displayName: String {
+        switch self {
+        case .none:      return "Paste"
+        case .plainText: return "Paste as Plain Text"
+        case .trimmed:   return "Paste Trimmed"
+        case .lowercase: return "Paste as lowercase"
+        case .uppercase: return "Paste as UPPERCASE"
+        case .titleCase: return "Paste as Title Case"
+        }
+    }
+
+    /// Rewrite the text body about to be placed on the pasteboard.
+    func apply(_ text: String) -> String {
+        switch self {
+        case .none, .plainText:
+            return text
+        case .trimmed:
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .lowercase:
+            return text.lowercased()
+        case .uppercase:
+            return text.uppercased()
+        case .titleCase:
+            // Foundation's `.capitalized` lowercases the rest of each word
+            // and uppercases the first letter, locale-aware. Good enough for
+            // a one-shot transform; users wanting AP / Chicago style can
+            // post-edit.
+            return text.capitalized
+        }
+    }
+
+    /// Map `NSEvent.modifierFlags` to a transform. Used by click / Return
+    /// handlers in the popover so the user can shape the paste at the
+    /// moment of action.
+    ///
+    /// - `⌥` (Option)               → `.plainText`
+    /// - `⇧` (Shift)                → `.trimmed`
+    /// - `⌃` (Control)              → `.lowercase`
+    /// - `⌃⇧` (Control+Shift)       → `.uppercase`
+    /// - `⌃⌥` (Control+Option)      → `.titleCase`
+    /// - Any other combination falls back to `.none`.
+    static func from(modifiers: NSEvent.ModifierFlags) -> PasteTransform {
+        let m = modifiers.intersection(.deviceIndependentFlagsMask)
+        // ⌘ is always present on a paste action when invoked via ⌘+digit /
+        // ⌘+Return — strip it before pattern-matching so the caller doesn't
+        // have to mask it themselves.
+        let mods = m.subtracting(.command)
+        if mods == [.control, .shift]  { return .uppercase }
+        if mods == [.control, .option] { return .titleCase }
+        if mods == .control            { return .lowercase }
+        if mods == .shift              { return .trimmed }
+        if mods == .option             { return .plainText }
+        return .none
     }
 }
 
 /// Top-level segmentation surfaced in the history popover.
-/// `.clipboard` shows text/rich-text/file items; `.screenshots` shows images.
+/// `.clipboard` shows text/rich-text/file items; `.screenshots` shows images;
+/// `.snippets` shows the user's curated snippet library.
 enum HistoryCategory: String, CaseIterable, Identifiable {
     case clipboard
     case screenshots
+    case snippets
 
     var id: String { rawValue }
 
@@ -808,6 +1065,7 @@ enum HistoryCategory: String, CaseIterable, Identifiable {
         switch self {
         case .clipboard: return "Clipboard"
         case .screenshots: return "Screenshots"
+        case .snippets: return "Snippets"
         }
     }
 
@@ -815,6 +1073,99 @@ enum HistoryCategory: String, CaseIterable, Identifiable {
         switch self {
         case .clipboard: return "doc.on.clipboard"
         case .screenshots: return "photo"
+        case .snippets: return "text.badge.star"
         }
+    }
+}
+
+/// Secondary type chip applied to the clipboard tab. `.all` is the default
+/// and short-circuits the filter; the others narrow by surface heuristics
+/// (URL detector, color regex, type tag, etc.).
+enum TypeFilter: String, CaseIterable, Identifiable {
+    case all
+    case text
+    case link
+    case file
+    case color
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all:   return "All"
+        case .text:  return "Text"
+        case .link:  return "Link"
+        case .file:  return "File"
+        case .color: return "Color"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .all:   return "tray.full"
+        case .text:  return "doc.text"
+        case .link:  return "link"
+        case .file:  return "folder"
+        case .color: return "paintpalette"
+        }
+    }
+
+    /// `true` if `item` belongs in the chip's filtered slice.
+    func matches(_ item: ClipboardItem) -> Bool {
+        switch self {
+        case .all:
+            return true
+        case .text:
+            // Plain or rich text that *isn't* obviously a URL/color — those
+            // get their own chips and would otherwise show up in both.
+            guard item.contentType == .text || item.contentType == .richText else { return false }
+            let body = item.textContent ?? ""
+            return !Self.isLink(body) && !Self.isColor(body)
+        case .link:
+            guard item.contentType == .text || item.contentType == .richText else { return false }
+            return Self.isLink(item.textContent ?? "")
+        case .file:
+            return item.contentType == .fileURL
+        case .color:
+            guard item.contentType == .text || item.contentType == .richText else { return false }
+            return Self.isColor(item.textContent ?? "")
+        }
+    }
+
+    private static func isLink(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains(" "), !trimmed.contains("\n") else { return false }
+        if let url = URL(string: trimmed),
+           let scheme = url.scheme?.lowercased(),
+           ["http", "https", "ftp", "mailto", "tel", "file"].contains(scheme) {
+            return true
+        }
+        // Bare host like "github.com/x" — must contain a dot, no spaces, and
+        // look at least vaguely TLD-shaped.
+        if trimmed.contains(".") && !trimmed.contains("/.") {
+            let components = trimmed.split(separator: ".")
+            if let tld = components.last, tld.count >= 2 && tld.allSatisfy({ $0.isLetter || $0.isNumber }) {
+                return components.count >= 2
+            }
+        }
+        return false
+    }
+
+    /// Conservative color literal detector: `#RGB`, `#RGBA`, `#RRGGBB`,
+    /// `#RRGGBBAA`, `rgb(...)`, `rgba(...)`, `hsl(...)`, `hsla(...)`. The
+    /// whole trimmed string must be the color — embedding one inside prose
+    /// doesn't qualify.
+    private static func isColor(_ text: String) -> Bool {
+        let s = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !s.isEmpty, s.count <= 64 else { return false }
+        if s.hasPrefix("#") {
+            let hex = s.dropFirst()
+            guard [3, 4, 6, 8].contains(hex.count) else { return false }
+            return hex.allSatisfy { $0.isHexDigit }
+        }
+        if s.hasPrefix("rgb(") || s.hasPrefix("rgba(") || s.hasPrefix("hsl(") || s.hasPrefix("hsla(") {
+            return s.hasSuffix(")")
+        }
+        return false
     }
 }

@@ -28,6 +28,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var settingsManager = SettingsManager.shared
     var previousApp: NSRunningApplication?
     private var popoverKeyMonitor: Any?
+    private var popoverGlobalMouseMonitor: Any?
     private var popoverCloseObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -46,11 +47,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Setup popover (content set lazily on first show)
         popover = NSPopover()
-        popover.contentSize = NSSize(width: 350, height: 500)
-        popover.behavior = .transient
+        popover.contentSize = NSSize(width: 460, height: 640)
+        // `.semitransient` keeps the popover open while the user is still
+        // interacting with our own app — needed because both `NSMenu.popUp`
+        // and SwiftUI sheets present in sibling windows that `.transient`
+        // would treat as a click-outside, dismissing the popover and
+        // leaving the menu / sheet orphaned. `.semitransient` still
+        // auto-closes when the user switches to a different app.
+        popover.behavior = .semitransient
 
         // Start monitoring clipboard
         clipboardManager.startMonitoring()
+
+        // Honor the persisted "expand snippet abbreviations" setting. The
+        // expander prompts for Accessibility on its own when the user first
+        // flips it on, so we don't pre-prompt here at launch.
+        if settingsManager.snippetAbbreviationsEnabled {
+            SnippetAbbreviationExpander.shared.setEnabled(true)
+        }
 
         // Register global hotkeys via HotkeyManager (configurable in Settings).
         HotkeyManager.shared.install { action in
@@ -108,13 +122,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// ⌘+digit to paste the Nth visible item.
     private func installPopoverKeyMonitor() {
         removePopoverKeyMonitor()
-        // Seed keyboard selection on the first row so the user sees focus.
-        if clipboardManager.keyboardSelectedID == nil {
-            clipboardManager.keyboardSelectedID = clipboardManager.filteredHistory.first?.id
-        }
+        seedKeyboardSelection()
         popoverKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.popover.isShown else { return event }
+            // When a modal sheet (e.g. the snippet editor) is presented on
+            // top of the popover, let it own the keyboard. Otherwise Escape
+            // would close the popover *around* the sheet, leaving an
+            // orphaned modal that swallows all clicks.
+            if let popoverWindow = self.popover.contentViewController?.view.window,
+               popoverWindow.attachedSheet != nil {
+                return event
+            }
             return self.handlePopoverKey(event)
+        }
+        // `.semitransient` keeps the popover open across in-app sibling
+        // windows (menus, sheets). The trade-off is that it sometimes fails
+        // to auto-dismiss when the user clicks into another app — most
+        // visibly after a `Menu` dismissal leaves NSApp in an "active but
+        // unfocused" limbo. This global monitor is the safety net: any
+        // mouse click that happens outside ALL of our own windows closes
+        // the popover (and any orphaned menu / sheet along with it).
+        popoverGlobalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            guard let self, self.popover.isShown else { return }
+            // Don't dismiss while a modal sheet (e.g. the snippet editor)
+            // is attached — closing the popover would orphan the sheet and
+            // wedge the UI. The sheet's own Cancel / Save buttons are the
+            // intended dismissal path.
+            if let popoverWindow = self.popover.contentViewController?.view.window,
+               popoverWindow.attachedSheet != nil {
+                return
+            }
+            // A global monitor only fires for clicks in OTHER apps — clicks
+            // inside our own windows go through the local monitor. So if we
+            // got here, the click was outside us; close down cleanly. The
+            // monitor's closure already runs on the main thread; we don't
+            // need to hop again.
+            self.popover.performClose(nil)
+            ImageQuickPreview.shared.dismiss()
         }
         if popoverCloseObserver == nil {
             popoverCloseObserver = NotificationCenter.default.addObserver(
@@ -132,35 +176,79 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(m)
             popoverKeyMonitor = nil
         }
+        if let m = popoverGlobalMouseMonitor {
+            NSEvent.removeMonitor(m)
+            popoverGlobalMouseMonitor = nil
+        }
+    }
+
+    /// Pick a sensible row to highlight as soon as the popover comes up so
+    /// keyboard navigation has something to anchor to. The snippets tab has
+    /// its own selection state to keep the highlight stable when the user
+    /// flips between tabs.
+    private func seedKeyboardSelection() {
+        if clipboardManager.selectedCategory == .snippets {
+            if clipboardManager.keyboardSelectedSnippetID == nil {
+                clipboardManager.keyboardSelectedSnippetID = clipboardManager.filteredSnippets.first?.id
+            }
+        } else {
+            if clipboardManager.keyboardSelectedID == nil {
+                clipboardManager.keyboardSelectedID = clipboardManager.filteredHistory.first?.id
+            }
+        }
     }
 
     private func handlePopoverKey(_ event: NSEvent) -> NSEvent? {
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let list = clipboardManager.filteredHistory
-        let asPlain = mods.contains(.option)
+        let transform = PasteTransform.from(modifiers: mods)
+        let isSnippets = clipboardManager.selectedCategory == .snippets
 
-        // ⌘+digit → quick paste of the Nth visible row.
-        if mods.subtracting(.option) == .command,
+        // ⌘+digit → quick paste of the Nth visible row. Any combination of
+        // ⌥/⇧/⌃ alongside selects the paste transform (see
+        // `PasteTransform.from(modifiers:)`).
+        let nonCmdMods = mods.subtracting([.option, .shift, .control])
+        if nonCmdMods == .command,
            let chars = event.charactersIgnoringModifiers,
-           let digit = Int(chars), digit >= 1, digit <= 9, digit <= list.count {
-            clipboardManager.pasteItem(list[digit - 1], asPlainText: asPlain)
-            popover.performClose(nil)
-            return nil
+           let digit = Int(chars), digit >= 1, digit <= 9 {
+            if isSnippets {
+                let list = clipboardManager.filteredSnippets
+                if digit <= list.count {
+                    clipboardManager.pasteSnippet(list[digit - 1], transform: transform)
+                    popover.performClose(nil)
+                    return nil
+                }
+            } else {
+                let list = clipboardManager.filteredHistory
+                if digit <= list.count {
+                    clipboardManager.pasteItem(list[digit - 1], transform: transform)
+                    popover.performClose(nil)
+                    return nil
+                }
+            }
         }
 
         switch Int(event.keyCode) {
         case 125: // down
-            advanceSelection(by: 1, in: list)
+            advanceSelection(by: 1)
             return nil
         case 126: // up
-            advanceSelection(by: -1, in: list)
+            advanceSelection(by: -1)
             return nil
         case 36, 76: // return / numpad enter
-            if let id = clipboardManager.keyboardSelectedID,
-               let item = list.first(where: { $0.id == id }) {
-                clipboardManager.pasteItem(item, asPlainText: asPlain)
-                popover.performClose(nil)
-                return nil
+            if isSnippets {
+                if let id = clipboardManager.keyboardSelectedSnippetID,
+                   let snippet = clipboardManager.filteredSnippets.first(where: { $0.id == id }) {
+                    clipboardManager.pasteSnippet(snippet, transform: transform)
+                    popover.performClose(nil)
+                    return nil
+                }
+            } else {
+                if let id = clipboardManager.keyboardSelectedID,
+                   let item = clipboardManager.filteredHistory.first(where: { $0.id == id }) {
+                    clipboardManager.pasteItem(item, transform: transform)
+                    popover.performClose(nil)
+                    return nil
+                }
             }
             return event
         case 53: // esc
@@ -171,11 +259,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func advanceSelection(by delta: Int, in list: [ClipboardItem]) {
-        guard !list.isEmpty else { return }
-        let currentIndex = list.firstIndex(where: { $0.id == clipboardManager.keyboardSelectedID }) ?? -1
-        let nextIndex = max(0, min(list.count - 1, currentIndex + delta))
-        clipboardManager.keyboardSelectedID = list[nextIndex].id
+    private func advanceSelection(by delta: Int) {
+        if clipboardManager.selectedCategory == .snippets {
+            let list = clipboardManager.filteredSnippets
+            guard !list.isEmpty else { return }
+            let currentIndex = list.firstIndex(where: { $0.id == clipboardManager.keyboardSelectedSnippetID }) ?? -1
+            let nextIndex = max(0, min(list.count - 1, currentIndex + delta))
+            clipboardManager.keyboardSelectedSnippetID = list[nextIndex].id
+        } else {
+            let list = clipboardManager.filteredHistory
+            guard !list.isEmpty else { return }
+            let currentIndex = list.firstIndex(where: { $0.id == clipboardManager.keyboardSelectedID }) ?? -1
+            let nextIndex = max(0, min(list.count - 1, currentIndex + delta))
+            clipboardManager.keyboardSelectedID = list[nextIndex].id
+        }
     }
 
     func closePopoverAndRestoreFocus(then action: @escaping @Sendable () -> Void) {

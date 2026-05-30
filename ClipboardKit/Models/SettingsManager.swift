@@ -20,6 +20,8 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let hasSeenOnboarding = "hasSeenOnboarding"
         static let alwaysPastePlainText = "alwaysPastePlainText"
         static let restoreClipboardAfterPaste = "restoreClipboardAfterPaste"
+        static let deduplicateEntries = "deduplicateEntries"
+        static let snippetAbbreviationsEnabled = "snippetAbbreviationsEnabled"
         static func hotkeyKeyCode(_ action: HotkeyAction) -> String { "hotkey.\(action.rawValue).keyCode" }
         static func hotkeyModifiers(_ action: HotkeyAction) -> String { "hotkey.\(action.rawValue).modifiers" }
     }
@@ -94,6 +96,28 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         didSet { defaults.set(restoreClipboardAfterPaste, forKey: Keys.restoreClipboardAfterPaste) }
     }
 
+    /// When on, copying an item that already exists in history (same text,
+    /// same file paths, or same image bytes) moves the existing entry to the
+    /// top instead of creating a fresh row. When off, every copy produces a
+    /// new entry — useful when you actively use the timestamps to audit
+    /// how/when you copied something.
+    @Published var deduplicateEntries: Bool {
+        didSet { defaults.set(deduplicateEntries, forKey: Keys.deduplicateEntries) }
+    }
+
+    /// When on, ClipboardKit installs a CGEvent tap that watches typed
+    /// characters and, on detecting a snippet's `abbreviation`, deletes the
+    /// typed trigger and pastes the snippet body in its place. Requires
+    /// Accessibility permission; we ask for it the first time this flips on.
+    @Published var snippetAbbreviationsEnabled: Bool {
+        didSet {
+            defaults.set(snippetAbbreviationsEnabled, forKey: Keys.snippetAbbreviationsEnabled)
+            DispatchQueue.main.async {
+                SnippetAbbreviationExpander.shared.setEnabled(self.snippetAbbreviationsEnabled)
+            }
+        }
+    }
+
     var largeFileThresholdBytes: Int {
         largeFileThresholdMB * 1_000_000
     }
@@ -106,7 +130,7 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
             ?? NSString("~/Desktop").expandingTildeInPath
 
         if defaults.object(forKey: Keys.maxHistoryCount) == nil {
-            defaults.set(50, forKey: Keys.maxHistoryCount)
+            defaults.set(999, forKey: Keys.maxHistoryCount)
         }
         if defaults.object(forKey: Keys.largeFileStoragePath) == nil {
             defaults.set(defaultStoragePath, forKey: Keys.largeFileStoragePath)
@@ -138,6 +162,12 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         if defaults.object(forKey: Keys.restoreClipboardAfterPaste) == nil {
             defaults.set(false, forKey: Keys.restoreClipboardAfterPaste)
         }
+        if defaults.object(forKey: Keys.deduplicateEntries) == nil {
+            defaults.set(true, forKey: Keys.deduplicateEntries)
+        }
+        if defaults.object(forKey: Keys.snippetAbbreviationsEnabled) == nil {
+            defaults.set(false, forKey: Keys.snippetAbbreviationsEnabled)
+        }
 
         self.maxHistoryCount = defaults.integer(forKey: Keys.maxHistoryCount)
         self.largeFileStoragePath = defaults.string(forKey: Keys.largeFileStoragePath) ?? defaultStoragePath
@@ -151,6 +181,8 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         self.hasSeenOnboarding = defaults.bool(forKey: Keys.hasSeenOnboarding)
         self.alwaysPastePlainText = defaults.bool(forKey: Keys.alwaysPastePlainText)
         self.restoreClipboardAfterPaste = defaults.bool(forKey: Keys.restoreClipboardAfterPaste)
+        self.deduplicateEntries = defaults.bool(forKey: Keys.deduplicateEntries)
+        self.snippetAbbreviationsEnabled = defaults.bool(forKey: Keys.snippetAbbreviationsEnabled)
 
         // Ensure storage directory exists
         ensureStorageDirectoryExists()

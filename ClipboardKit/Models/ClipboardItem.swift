@@ -55,6 +55,16 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     /// item is added. `nil` for non-URL items or while the fetch is in
     /// flight. `LinkPreview.failed == true` means we tried and gave up.
     var linkPreview: LinkPreview?
+    /// Bundle identifier of the app that was frontmost when the item was
+    /// captured. `nil` for items imported by drop, screenshots, snippets,
+    /// or anything captured before this field shipped.
+    var sourceBundleID: String?
+    /// Hex-encoded SHA256 of the captured payload for `.image` items. Used
+    /// by the duplicate-collapsing path so re-copying the same screenshot
+    /// floats the existing row up instead of creating a near-identical
+    /// duplicate. `nil` for non-image items or items captured before this
+    /// field shipped.
+    var contentHash: String?
 
     enum ContentType: String, Codable {
         case text
@@ -71,7 +81,9 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
          filePaths: [String]? = nil,
          originalSize: Int,
          isPinned: Bool = false,
-         linkPreview: LinkPreview? = nil) {
+         linkPreview: LinkPreview? = nil,
+         sourceBundleID: String? = nil,
+         contentHash: String? = nil) {
         self.id = id
         self.timestamp = timestamp
         self.contentType = contentType
@@ -81,14 +93,17 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.originalSize = originalSize
         self.isPinned = isPinned
         self.linkPreview = linkPreview
+        self.sourceBundleID = sourceBundleID
+        self.contentHash = contentHash
     }
 
-    /// Custom decoder so payloads written before `isPinned` / `linkPreview`
-    /// existed still decode (they default to `false` / `nil`). Encoding is
-    /// left to the synthesized `Codable` conformance.
+    /// Custom decoder so payloads written before `isPinned` / `linkPreview` /
+    /// `sourceBundleID` / `contentHash` existed still decode (they default to
+    /// `false` / `nil`). Encoding is left to the synthesized `Codable`
+    /// conformance.
     private enum CodingKeys: String, CodingKey {
         case id, timestamp, contentType, textContent, fileName, filePaths,
-             originalSize, isPinned, linkPreview
+             originalSize, isPinned, linkPreview, sourceBundleID, contentHash
     }
 
     init(from decoder: Decoder) throws {
@@ -102,6 +117,8 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.originalSize = try c.decode(Int.self, forKey: .originalSize)
         self.isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         self.linkPreview = try c.decodeIfPresent(LinkPreview.self, forKey: .linkPreview)
+        self.sourceBundleID = try c.decodeIfPresent(String.self, forKey: .sourceBundleID)
+        self.contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
     }
 
     var displayText: String {

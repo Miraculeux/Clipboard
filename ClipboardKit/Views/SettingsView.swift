@@ -101,19 +101,24 @@ struct SettingsView: View {
                                 .textFieldStyle(.roundedBorder)
                                 .multilineTextAlignment(.center)
                                 .onChange(of: historyCountText) { _, newValue in
-                                    if let count = Int(newValue), count > 0, count <= 1000 {
+                                    if let count = Int(newValue), count > 0, count <= 9999 {
                                         settings.maxHistoryCount = count
                                     }
                                 }
-                            Stepper("", value: $settings.maxHistoryCount, in: 1...1000, step: 10)
+                            Stepper("", value: $settings.maxHistoryCount, in: 1...9999, step: 50)
                                 .labelsHidden()
                                 .onChange(of: settings.maxHistoryCount) { _, newValue in
                                     historyCountText = "\(newValue)"
                                 }
-                            Text("1 – 1000")
+                            Text("1 – 9999")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
+                    }
+                    GridRow {
+                        Text("")
+                        Toggle("Merge duplicate entries (re-copying floats the existing row to the top)",
+                               isOn: $settings.deduplicateEntries)
                     }
                 }
                 .padding(10)
@@ -126,6 +131,23 @@ struct SettingsView: View {
                     Toggle("Show notification when item is captured", isOn: $settings.showNotifications)
                     Toggle("Always paste as plain text (strip formatting)", isOn: $settings.alwaysPastePlainText)
                     Toggle("Restore previous clipboard after paste", isOn: $settings.restoreClipboardAfterPaste)
+                    Text("Paste modifiers: ⌥ plain text · ⇧ trimmed · ⌃ lowercase · ⌃⇧ UPPERCASE · ⌃⌥ Title Case")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            GroupBox("Snippets") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Expand snippet abbreviations as you type",
+                           isOn: $settings.snippetAbbreviationsEnabled)
+                    Text("Requires Accessibility permission. Typing a snippet's abbreviation followed by space / punctuation will replace it with the snippet body.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
