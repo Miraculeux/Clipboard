@@ -42,34 +42,24 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
-            List(Section.allCases, selection: $selection) { section in
-                NavigationLink(value: section) {
-                    Label {
-                        Text(section.title)
-                    } icon: {
-                        Image(systemName: section.systemImage)
-                            .foregroundStyle(.white)
-                            .frame(width: 20, height: 20)
-                            .background(
-                                RoundedRectangle(cornerRadius: 5)
-                                    .fill(section.tint)
-                            )
-                    }
+        // macOS-style preferences window: tabs at the top, each tab is a
+        // scrollable form. This is the idiomatic shape for the SwiftUI
+        // `Settings { }` scene and avoids the empty toolbar / sidebar
+        // chrome issues NavigationSplitView shows there on macOS 26.
+        TabView(selection: $selection) {
+            ForEach(Section.allCases) { section in
+                ScrollView {
+                    content(for: section)
+                        .padding(20)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
+                .tabItem {
+                    Label(section.title, systemImage: section.systemImage)
+                }
+                .tag(section)
             }
-            .listStyle(.sidebar)
-            .navigationTitle("Settings")
-            .navigationSplitViewColumnWidth(min: 170, ideal: 180, max: 220)
-        } detail: {
-            ScrollView {
-                content(for: selection)
-                    .padding(20)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-            .navigationTitle(selection.title)
         }
-        .frame(minWidth: 640, idealWidth: 720, minHeight: 420, idealHeight: 460)
+        .frame(minWidth: 640, idealWidth: 720, minHeight: 460, idealHeight: 520)
         .onAppear {
             historyCountText = "\(settings.maxHistoryCount)"
         }
@@ -177,9 +167,13 @@ struct SettingsView: View {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     ForEach(HotkeyAction.allCases, id: \.self) { action in
                         GridRow {
+                            // Wrap instead of truncate \u2014 some action labels
+                            // (e.g. "Long (scrolling) screenshot") are wider
+                            // than the column at the default Settings size,
+                            // and ellipsizing made them unreadable.
                             Text(action.title)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(minWidth: 220, alignment: .leading)
                             HotkeyRecorderView(action: action, settings: settings)
                         }
                     }
@@ -347,16 +341,10 @@ struct SettingsView: View {
 
     // MARK: - Helpers
 
-    /// Ask Seeker (com.marvel.Seeker) to reveal a file or folder via its
-    /// `seeker://reveal?path=…` URL handler.
+    /// Ask Seeker (com.marvel.Seeker) to reveal a file or folder. Thin
+    /// wrapper around the shared implementation in `UrlActions`.
     private func revealInSeeker(path: String) {
-        var comps = URLComponents()
-        comps.scheme = "seeker"
-        comps.host = "reveal"
-        comps.queryItems = [URLQueryItem(name: "path", value: path)]
-        if let url = comps.url {
-            NSWorkspace.shared.open(url)
-        }
+        UrlActions.revealInSeeker(path: path)
     }
 
     private func clearStoredFiles() {

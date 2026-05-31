@@ -480,6 +480,29 @@ struct ClipboardItemRow: View, Equatable {
                     .help("Reveal in Seeker")
                 }
 
+                // File items (Finder copies + our own MP4/GIF recordings)
+                // get a Reveal-in-Seeker shortcut too. We default to the
+                // first path \u2014 multi-file selections still reveal all via
+                // the context menu.
+                if item.contentType == .fileURL,
+                   let first = item.filePaths?.first {
+                    Button(action: { Self.togglePreview(path: first) }) {
+                        Image(systemName: "eye")
+                            .font(.system(size: 12, weight: .regular))
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Quick Look")
+
+                    Button(action: { UrlActions.revealInSeeker(path: first) }) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 12, weight: .regular))
+                            .frame(width: 16, height: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Reveal in Seeker")
+                }
+
                 Button(action: { manager.togglePin(item) }) {
                     Image(systemName: item.isPinned ? "pin.fill" : "pin")
                         .font(.system(size: 12, weight: .regular))
@@ -550,10 +573,11 @@ struct ClipboardItemRow: View, Equatable {
             }
             if item.contentType == .fileURL, let paths = item.filePaths, !paths.isEmpty {
                 Divider()
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting(paths.map { URL(fileURLWithPath: $0) })
+                Button("Reveal in Seeker") {
+                    for p in paths { UrlActions.revealInSeeker(path: p) }
                 }
                 Button("Open") {
+                    AppDelegate.shared?.popover.close()
                     for p in paths { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
                 }
             }
@@ -741,19 +765,21 @@ struct ClipboardItemRow: View, Equatable {
     /// Static so the action button doesn't need to capture parent state.
     /// Self-contained: derives everything it needs from `item`.
     fileprivate static func togglePreview(path: String) {
-        ImageQuickPreview.shared.toggle(path: path)
+        // Close the popover before showing Quick Look. The popover sits on
+        // top of the QLPreviewPanel and steals first-responder, so without
+        // dismissing it the preview either appears behind the popover or
+        // can't receive its own keyboard shortcuts (Space, arrows).
+        AppDelegate.shared?.popover.close()
+        DispatchQueue.main.async {
+            ImageQuickPreview.shared.toggle(path: path)
+        }
     }
 
-    /// Ask Seeker (com.marvel.Seeker) to reveal the on-disk PNG. Sends a
-    /// `seeker://reveal?path=<absolute-path>` URL, which Seeker registers as
-    /// a URL handler.
+    /// Ask Seeker (com.marvel.Seeker) to reveal the on-disk PNG. Delegates
+    /// to the shared implementation in `UrlActions` so the integration only
+    /// has one source of truth.
     fileprivate static func revealInSeeker(path: String) {
-        var comps = URLComponents()
-        comps.scheme = "seeker"
-        comps.host = "reveal"
-        comps.queryItems = [URLQueryItem(name: "path", value: path)]
-        guard let url = comps.url else { NSSound.beep(); return }
-        NSWorkspace.shared.open(url)
+        UrlActions.revealInSeeker(path: path)
     }
 
     /// Load the PNG at `path` from disk and open it in the annotation

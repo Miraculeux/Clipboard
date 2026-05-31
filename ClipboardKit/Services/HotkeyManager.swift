@@ -9,6 +9,9 @@ enum HotkeyAction: Int, CaseIterable, Codable {
     case captureFullScreen = 4
     case captureWindow = 5
     case repeatLastCapture = 6
+    case recordRegionVideo = 7
+    case recordRegionGIF = 8
+    case stopRecording = 9
 
     var title: String {
         switch self {
@@ -18,6 +21,9 @@ enum HotkeyAction: Int, CaseIterable, Codable {
         case .captureFullScreen: return "Capture full screen"
         case .captureWindow: return "Capture window"
         case .repeatLastCapture: return "Repeat last capture"
+        case .recordRegionVideo: return "Record region as MP4"
+        case .recordRegionGIF: return "Record region as GIF"
+        case .stopRecording: return "Stop recording"
         }
     }
 
@@ -40,6 +46,10 @@ enum HotkeyAction: Int, CaseIterable, Codable {
         case .repeatLastCapture:
             // Off by default; users who want "snap the same area again" can
             // bind it (e.g. ⌘⇧R).
+            return .disabled
+        case .recordRegionVideo, .recordRegionGIF, .stopRecording:
+            // Recording is opt-in; recommended bindings:
+            //   MP4  ⌘⇧6, GIF ⌘⇧7, Stop ⌘⇧… user's choice.
             return .disabled
         }
     }

@@ -172,6 +172,11 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                 // `attributesOfItem` is a syscall per file; do the size sum
                 // off-main and assemble the item from the background.
                 let captured = filePaths
+                // Consume the same one-shot hint used by image screenshots
+                // so files written by ScreenRecorder land in the Screenshots
+                // tab too (MP4 / GIF recordings).
+                let isScreenshot = CaptureOutput.pendingScreenshotHint
+                CaptureOutput.pendingScreenshotHint = false
                 DispatchQueue.global(qos: .utility).async { [weak self] in
                     let totalSize = captured.reduce(0) { acc, path in
                         acc + ((try? FileManager.default.attributesOfItem(atPath: path)[.size] as? Int) ?? 0)
@@ -184,7 +189,8 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                         fileName: nil,
                         filePaths: captured,
                         originalSize: totalSize,
-                        sourceBundleID: sourceBundleID
+                        sourceBundleID: sourceBundleID,
+                        isScreenshot: isScreenshot
                     )
                     self?.addItem(item)
                 }
@@ -460,6 +466,26 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                 }
             }
 
+            // Run OCR on screenshots so users can search the history by the
+            // text the capture shows. We deliberately only auto-index
+            // captures from our own pipeline (not arbitrary pasted images)
+            // to avoid burning CPU on big multi-megabyte JPEGs the user
+            // dragged in for unrelated reasons.
+            if inserted.isScreenshot,
+               inserted.contentType == .image,
+               inserted.ocrText == nil,
+               let path = inserted.fileName {
+                let pendingID = inserted.id
+                OCRService.recognizeText(at: URL(fileURLWithPath: path)) { [weak self] result in
+                    let text: String
+                    switch result {
+                    case .success(let t): text = t
+                    case .failure: text = ""
+                    }
+                    self?.applyOCRText(itemID: pendingID, text: text)
+                }
+            }
+
             // Insert the fresh item right below the pinned section so pins
             // stay at the very top of the list.
             let pinnedCount = self.history.prefix(while: { $0.isPinned }).count
@@ -497,6 +523,50 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             updated.linkPreview = preview
             self.history[idx] = updated
             self.scheduleSave()
+        }
+    }
+
+    /// Store the OCR result for a screenshot item; powers full-text search.
+    /// Trims leading/trailing whitespace before storage so blank results
+    /// (newlines from layout-only captures) don't match every empty query.
+    /// No-op if the item was evicted while OCR was running.
+    private func applyOCRText(itemID: ClipboardItem.ID, text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self,
+                  let idx = self.history.firstIndex(where: { $0.id == itemID }) else { return }
+            var updated = self.history[idx]
+            updated.ocrText = trimmed
+            self.history[idx] = updated
+            self.scheduleSave()
+        }
+    }
+
+    /// Backfill OCR for every screenshot that doesn't already have a
+    /// transcript. Runs serially in the background so a large archive
+    /// doesn't pin all CPUs at once. Called manually from Settings.
+    func reindexScreenshotsOCR() {
+        let targets = history.filter {
+            $0.contentType == .image && $0.isScreenshot && ($0.ocrText == nil)
+        }
+        guard !targets.isEmpty else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            for item in targets {
+                guard let path = item.fileName else { continue }
+                let sem = DispatchSemaphore(value: 0)
+                OCRService.recognizeText(at: URL(fileURLWithPath: path)) { [weak self] result in
+                    let text: String
+                    switch result {
+                    case .success(let t): text = t
+                    case .failure: text = ""
+                    }
+                    self?.applyOCRText(itemID: item.id, text: text)
+                    sem.signal()
+                }
+                sem.wait()
+                _ = self // keep reference alive until loop end
+            }
         }
     }
 
@@ -884,8 +954,15 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                 case .clipboard:
                     // Apply the chip filter only on the clipboard tab. The
                     // screenshots tab is all-images by definition; further
-                    // narrowing would just yield "all or nothing".
-                    let base = history.filter { $0.contentType != .image }
+                    // narrowing would just yield "all or nothing". Also
+                    // exclude anything already shown in the Screenshots tab
+                    // (images + our own MP4/GIF recordings) so the same
+                    // capture doesn't appear in both places.
+                    let base = history.filter { item in
+                        if item.contentType == .image { return false }
+                        if item.isScreenshot { return false }
+                        return true
+                    }
                     categoryFiltered = typeFilter == .all
                         ? base
                         : base.filter { typeFilter.matches($0) }
@@ -893,14 +970,32 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                     // Only show items captured through our own pipeline.
                     // Legacy items (pre-flag) and pasted images go to the
                     // Clipboard tab so the Screenshots tab is a true archive
-                    // of captures, not a generic image gallery.
-                    categoryFiltered = history.filter { $0.contentType == .image && $0.isScreenshot }
+                    // of captures, not a generic image gallery. Recording
+                    // outputs (MP4 / GIF) come in as `.fileURL` items but
+                    // carry the same `isScreenshot` flag.
+                    categoryFiltered = history.filter { item in
+                        guard item.isScreenshot else { return false }
+                        if item.contentType == .image { return true }
+                        if item.contentType == .fileURL { return true }
+                        return false
+                    }
                 case .snippets:
                     categoryFiltered = []
                 }
                 guard !query.isEmpty else { return categoryFiltered }
-                return categoryFiltered.filter {
-                    $0.displayText.range(of: query, options: .caseInsensitive) != nil
+                return categoryFiltered.filter { item in
+                    // Search hits the user-visible label PLUS any indexed OCR
+                    // text on screenshot items, so users can find a capture
+                    // by the text it contains.
+                    if item.displayText.range(of: query, options: .caseInsensitive) != nil {
+                        return true
+                    }
+                    if let ocr = item.ocrText,
+                       !ocr.isEmpty,
+                       ocr.range(of: query, options: .caseInsensitive) != nil {
+                        return true
+                    }
+                    return false
                 }
             }
             .receive(on: DispatchQueue.main)

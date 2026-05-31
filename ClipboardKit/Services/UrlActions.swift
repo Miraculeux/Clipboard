@@ -11,6 +11,22 @@ struct UrlAction: Identifiable {
 }
 
 enum UrlActions {
+    /// Open `path` in Seeker (`com.marvel.Seeker`) via its `seeker://reveal?path=…`
+    /// URL handler. Used by every "Reveal in Seeker" entry point in the
+    /// app so changing the integration only requires editing this method.
+    /// Closes the clipboard popover before launching so Seeker can take
+    /// focus and the user isn't left looking at a now-unrelated history
+    /// list on top of the file they wanted to inspect.
+    static func revealInSeeker(path: String) {
+        var comps = URLComponents()
+        comps.scheme = "seeker"
+        comps.host = "reveal"
+        comps.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let url = comps.url else { NSSound.beep(); return }
+        AppDelegate.shared?.popover.close()
+        NSWorkspace.shared.open(url)
+    }
+
     /// Examine `text` and return appropriate side-actions for it. Returns
     /// `nil` (vs. an empty array) when there's nothing to attach so callers
     /// can omit the entire menu section without inserting a stray divider.
@@ -96,8 +112,8 @@ enum UrlActions {
             UrlAction(id: "open-file", label: "Open") {
                 NSWorkspace.shared.open(url)
             },
-            UrlAction(id: "reveal-file", label: "Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
+            UrlAction(id: "reveal-file", label: "Reveal in Seeker") {
+                Self.revealInSeeker(path: path)
             },
             UrlAction(id: "copy-path", label: "Copy Path") {
                 let pb = NSPasteboard.general

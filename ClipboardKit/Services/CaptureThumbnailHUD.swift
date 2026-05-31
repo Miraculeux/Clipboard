@@ -98,7 +98,7 @@ private final class ThumbnailPanel: NSPanel {
         self.savedURL = savedURL
         container.onClick = { [weak self] in self?.openAnnotator() }
         container.onClose = { [weak self] in self?.onDismissRequested?() }
-        container.onReveal = { [weak self] in self?.revealInFinder() }
+        container.onReveal = { [weak self] in self?.revealSavedFile() }
         container.onPin = { [weak self] in self?.pinFloatingCopy() }
         self.contentView = container
     }
@@ -114,9 +114,9 @@ private final class ThumbnailPanel: NSPanel {
         AnnotationWindowController.shared.present(image: image, savedPath: savedURL?.path)
     }
 
-    private func revealInFinder() {
+    private func revealSavedFile() {
         guard let url = savedURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
+        UrlActions.revealInSeeker(path: url.path)
     }
 
     private func pinFloatingCopy() {
@@ -174,7 +174,7 @@ private final class ThumbnailContainerView: NSView, NSDraggingSource {
 
         revealButton.bezelStyle = .circular
         revealButton.title = ""
-        revealButton.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Reveal in Finder")
+        revealButton.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Reveal in Seeker")
         revealButton.isBordered = false
         revealButton.frame = NSRect(x: 4, y: bounds.height - 24, width: 20, height: 20)
         revealButton.autoresizingMask = [.maxXMargin, .minYMargin]

@@ -81,6 +81,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 AppDelegate.shared?.captureWindow()
             case .repeatLastCapture:
                 ScreenshotCapture.shared.repeatLast()
+            case .recordRegionVideo:
+                Task { @MainActor in ScreenRecorder.shared.beginRegion(output: .mp4) }
+            case .recordRegionGIF:
+                Task { @MainActor in ScreenRecorder.shared.beginRegion(output: .gif) }
+            case .stopRecording:
+                ScreenRecorder.shared.stop()
             }
         }
 

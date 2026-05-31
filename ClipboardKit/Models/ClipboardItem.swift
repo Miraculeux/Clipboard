@@ -70,6 +70,10 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     /// a plain copy from another app. Used by the Screenshots tab to hide
     /// images that are merely on the pasteboard but aren't captures.
     var isScreenshot: Bool
+    /// Lazily-populated OCR transcript for screenshot items. Indexed by
+    /// the search bar so users can find captures by the text they show.
+    /// `nil` = never run; empty string = ran and found nothing.
+    var ocrText: String?
 
     enum ContentType: String, Codable {
         case text
@@ -89,7 +93,8 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
          linkPreview: LinkPreview? = nil,
          sourceBundleID: String? = nil,
          contentHash: String? = nil,
-         isScreenshot: Bool = false) {
+         isScreenshot: Bool = false,
+         ocrText: String? = nil) {
         self.id = id
         self.timestamp = timestamp
         self.contentType = contentType
@@ -102,6 +107,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.sourceBundleID = sourceBundleID
         self.contentHash = contentHash
         self.isScreenshot = isScreenshot
+        self.ocrText = ocrText
     }
 
     /// Custom decoder so payloads written before `isPinned` / `linkPreview` /
@@ -111,7 +117,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, timestamp, contentType, textContent, fileName, filePaths,
              originalSize, isPinned, linkPreview, sourceBundleID, contentHash,
-             isScreenshot
+             isScreenshot, ocrText
     }
 
     init(from decoder: Decoder) throws {
@@ -128,6 +134,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.sourceBundleID = try c.decodeIfPresent(String.self, forKey: .sourceBundleID)
         self.contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
         self.isScreenshot = try c.decodeIfPresent(Bool.self, forKey: .isScreenshot) ?? false
+        self.ocrText = try c.decodeIfPresent(String.self, forKey: .ocrText)
     }
 
     var displayText: String {
