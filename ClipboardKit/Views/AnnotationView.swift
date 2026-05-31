@@ -242,7 +242,11 @@ private final class AnnotationViewController: NSViewController {
             }
             let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "c" {
-                self.copyToClipboard()
+                // ⌘C copies but keeps the annotator open so the user can
+                // keep tweaking and paste elsewhere; the toolbar's Copy
+                // button (and ↩) still closes the window for the "done"
+                // affordance.
+                self.copyToClipboardKeepOpen()
                 return nil
             }
             return event
@@ -481,6 +485,16 @@ private final class AnnotationViewController: NSViewController {
         guard let data = canvas.flattenedPNG() else { NSSound.beep(); return }
         CaptureOutput.shared.deliver(pngData: data, showThumbnail: false)
         view.window?.close()
+    }
+
+    /// Copy variant that does NOT dismiss the annotation window. Wired to
+    /// the ⌘C shortcut so users can keep iterating on the annotations and
+    /// paste intermediate results elsewhere. Shows a brief toast since the
+    /// usual visual confirmation (the window closing) no longer happens.
+    @objc private func copyToClipboardKeepOpen() {
+        guard let data = canvas.flattenedPNG() else { NSSound.beep(); return }
+        CaptureOutput.shared.deliver(pngData: data, showThumbnail: false)
+        ToastCenter.shared.show("Copied to clipboard")
     }
 
     @objc private func recognizeText() {

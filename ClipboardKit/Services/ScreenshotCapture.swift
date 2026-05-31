@@ -26,11 +26,11 @@ final class ScreenshotCapture: @unchecked Sendable {
         if delay > 0 {
             DispatchQueue.main.async { [weak self] in
                 CountdownHUD.shared.start(seconds: delay) {
-                    self?._begin(initialMode: .region)
+                    Task { @MainActor in await self?._begin(initialMode: .region) }
                 }
             }
         } else {
-            DispatchQueue.main.async { self._begin(initialMode: .region) }
+            Task { @MainActor in await self._begin(initialMode: .region) }
         }
     }
 
@@ -42,11 +42,11 @@ final class ScreenshotCapture: @unchecked Sendable {
         if delay > 0 {
             DispatchQueue.main.async { [weak self] in
                 CountdownHUD.shared.start(seconds: delay) {
-                    self?._begin(initialMode: .window)
+                    Task { @MainActor in await self?._begin(initialMode: .window) }
                 }
             }
         } else {
-            DispatchQueue.main.async { self._begin(initialMode: .window) }
+            Task { @MainActor in await self._begin(initialMode: .window) }
         }
     }
 
@@ -113,7 +113,7 @@ final class ScreenshotCapture: @unchecked Sendable {
     }
 
     @MainActor
-    private func _begin(initialMode: SelectionView.CaptureMode) {
+    private func _begin(initialMode: SelectionView.CaptureMode) async {
         guard !isActive else { return }
         if authDenied {
             // Stay silent — prior attempt already informed the user. They can
@@ -123,8 +123,21 @@ final class ScreenshotCapture: @unchecked Sendable {
         }
         isActive = true
 
+        // Snapshot every connected display BEFORE the overlay window appears
+        // so the dim/selection layer can show a perfect frozen mirror of
+        // the desktop — including the system menu bar, which the overlay
+        // (shielding level) would otherwise cover. The actual screenshot on
+        // mouseUp re-captures the live screen via SCK so dynamic content
+        // (clock seconds, notifications) is fresh.
+        var snapshots: [NSScreen: CGImage] = [:]
+        for screen in NSScreen.screens {
+            if let img = await Self.snapshotScreen(screen) {
+                snapshots[screen] = img
+            }
+        }
+
         overlayWindows = NSScreen.screens.map { screen in
-            let w = SelectionWindow(screen: screen)
+            let w = SelectionWindow(screen: screen, snapshot: snapshots[screen])
             w.onFinish = { [weak self] rect, screen in
                 self?.finish(with: rect, on: screen)
             }
@@ -149,6 +162,34 @@ final class ScreenshotCapture: @unchecked Sendable {
 
         NSApp.activate()
         overlayWindows.first?.makeKey()
+    }
+
+    /// Capture a still image of `screen` via ScreenCaptureKit. Used as the
+    /// frozen background for the selection overlay so the menu bar (and
+    /// anything else under the shielding-level overlay) remains visible to
+    /// the user while they drag a selection.
+    @MainActor
+    private static func snapshotScreen(_ screen: NSScreen) async -> CGImage? {
+        guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            return nil
+        }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let scDisplay = content.displays.first(where: { $0.displayID == displayID }) else {
+                return nil
+            }
+            let scale = screen.backingScaleFactor
+            let filter = SCContentFilter(display: scDisplay, excludingWindows: [])
+            let config = SCStreamConfiguration()
+            config.width = Int(screen.frame.width * scale)
+            config.height = Int(screen.frame.height * scale)
+            config.showsCursor = false
+            config.capturesAudio = false
+            config.scalesToFit = false
+            return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        } catch {
+            return nil
+        }
     }
 
     /// User pressed ESC or made a zero-sized selection. Tear down without capturing.
@@ -324,7 +365,7 @@ final class SelectionWindow: NSWindow {
         }
     }
 
-    init(screen: NSScreen) {
+    init(screen: NSScreen, snapshot: CGImage? = nil) {
         self.targetScreen = screen
         super.init(
             contentRect: screen.frame,
@@ -336,6 +377,11 @@ final class SelectionWindow: NSWindow {
         self.backgroundColor = .clear
         self.hasShadow = false
         self.ignoresMouseEvents = false
+        // Always sit at shielding level so clicks anywhere on screen —
+        // including over the menu bar area — reach this overlay instead of
+        // being stolen by the system menu bar. The menu bar is visually
+        // hidden by us; we paint a frozen snapshot underneath so the user
+        // can still aim at it.
         self.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
         self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         self.isReleasedWhenClosed = false
@@ -343,9 +389,19 @@ final class SelectionWindow: NSWindow {
 
         let view = SelectionView(frame: NSRect(origin: .zero, size: screen.frame.size))
         view.host = self
+        view.snapshot = snapshot
         self.contentView = view
         self.setFrame(screen.frame, display: true)
         self.invalidateCursorRects(for: view)
+
+        // Hide the overlay from the Accessibility tree. Without this, the
+        // sub-element hit test (which walks the AX tree at the cursor
+        // position) lands on OUR overlay window first and returns its full
+        // screen-sized frame — the user sees "drilling does nothing".
+        self.setAccessibilityElement(false)
+        self.setAccessibilityHidden(true)
+        view.setAccessibilityElement(false)
+        view.setAccessibilityHidden(true)
     }
 
     override var canBecomeKey: Bool { true }
@@ -384,6 +440,11 @@ final class SelectionView: NSView {
 
     weak var host: SelectionWindow?
     var ignoredWindowNumbers: Set<Int> = []
+    /// Frozen mirror of this screen captured just before the overlay was
+    /// shown. Rendered as the bottom layer so dim/selection-hole drawing
+    /// reveals the menu bar and any windows beneath the shielding-level
+    /// overlay.
+    var snapshot: CGImage?
 
     private var captureMode: CaptureMode = .region
 
@@ -391,6 +452,32 @@ final class SelectionView: NSView {
     private var currentRect: NSRect?
     /// In window mode, the CGWindowID currently under the cursor.
     private var currentWindowID: CGWindowID?
+    /// In sub-element mode (window mode + ⌥ held), the AX-resolved rect
+    /// under the cursor in this view's coordinate space. When non-nil the
+    /// mouseUp handler treats the action as a region capture instead of a
+    /// window capture (SCK has no sub-window filter).
+    private var currentSubElementViewRect: NSRect?
+    /// AX ancestor chain at the current cursor position (leaf first). Lets
+    /// the scroll wheel walk between granularities — e.g. tree row → list →
+    /// File Explorer panel → whole VS Code window.
+    private var currentSubElementChain: [NSRect] = []
+    private var currentSubElementRoles: [String?] = []
+    /// Index into `currentSubElementChain`. 0 = deepest leaf, larger values
+    /// climb toward the window. Reset whenever the cursor moves to a
+    /// different leaf so a new hover starts from "smallest" again.
+    private var subElementDepth: Int = 0
+    /// Accumulated scroll delta so a single notch advances depth even when
+    /// the trackpad emits small fractional values.
+    private var scrollAccumulator: CGFloat = 0
+    /// Cached state of the ⌥ modifier between flags-changed events. We use
+    /// it to decide between whole-window and sub-element resolution on the
+    /// next `mouseMoved`/`mouseUp`.
+    private var optionHeld: Bool = false
+    /// Set when we observe `optionHeld && AX not trusted` so the overlay
+    /// can show a centered banner and we only pop the system Alert once
+    /// per session.
+    private var axPermissionDenied: Bool = false
+    private var axAlertShown: Bool = false
     /// Previous selection rect, used to compute a minimal dirty union so we
     /// don't invalidate the whole (potentially 5K) overlay on every drag
     /// frame. Without this, ProMotion can fire `mouseDragged` ~120 times per
@@ -429,6 +516,11 @@ final class SelectionView: NSView {
             previousRect = nil
             let oldRect = currentRect
             currentRect = nil
+            currentSubElementViewRect = nil
+            currentSubElementChain = []
+            currentSubElementRoles = []
+            subElementDepth = 0
+            scrollAccumulator = 0
             if let oldRect {
                 invalidate(from: oldRect, to: oldRect)
             }
@@ -437,6 +529,12 @@ final class SelectionView: NSView {
             let oldRect = currentRect
             currentRect = nil
             previousRect = nil
+            currentSubElementViewRect = nil
+            currentSubElementChain = []
+            currentSubElementRoles = []
+            subElementDepth = 0
+            scrollAccumulator = 0
+            currentWindowID = nil
             if let oldRect {
                 invalidate(from: oldRect, to: oldRect)
             }
@@ -453,6 +551,9 @@ final class SelectionView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         if captureMode == .window {
+            // Re-sync ⌥ from the click event in case flagsChanged was
+            // missed (e.g. modifier pressed before the overlay became key).
+            optionHeld = event.modifierFlags.contains(.option)
             updateWindowSelectionFromCursor()
             return
         }
@@ -517,30 +618,215 @@ final class SelectionView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         guard captureMode == .window else { return }
+        optionHeld = event.modifierFlags.contains(.option)
         updateWindowSelectionFromCursor()
     }
 
+    /// Track ⌥ even when the mouse isn't moving so the highlight switches
+    /// the moment the user presses the modifier.
+    override func flagsChanged(with event: NSEvent) {
+        guard captureMode == .window else {
+            super.flagsChanged(with: event)
+            return
+        }
+        let now = event.modifierFlags.contains(.option)
+        if now != optionHeld {
+            optionHeld = now
+            updateWindowSelectionFromCursor()
+            setNeedsDisplay(bounds)   // refresh hint label
+        }
+    }
+
     private func updateWindowSelectionFromCursor() {
+        // ⌥ held → drill into sub-window elements via Accessibility API.
+        if optionHeld {
+            refreshSubElementChain()
+            if let sub = currentSubElementRect() {
+                invalidate(from: currentRect, to: sub)
+                currentRect = sub
+                previousRect = sub
+                currentSubElementViewRect = sub
+                currentWindowID = nil
+                return
+            }
+        }
+
         let hit = windowUnderCursor()
+
+        // The menu bar is rendered as a single CGWindow that visually
+        // contains every status item (Wi-Fi, Bluetooth, clock, …). When
+        // the user is hovering over it, fall through to the AX hit test
+        // so they can pick an individual item without holding ⌥. The
+        // resulting rect goes through the region capture path because
+        // SCK can't filter individual menu-bar items.
+        if let hit, hit.isOverlayWindow,
+           let host,
+           let cursorCG = CGEvent(source: nil)?.location,
+           AXHitTester.ensureTrusted(prompt: false),
+           let menuHit = AXHitTester.menuBarItem(at: cursorCG) {
+            let leaf = Self.appKitViewRect(fromCG: menuHit.cgRect, on: host.targetScreen)
+            if leaf.width >= 4, leaf.height >= 4 {
+                invalidate(from: currentRect, to: leaf)
+                currentRect = leaf
+                previousRect = leaf
+                currentSubElementViewRect = leaf
+                currentWindowID = nil
+                currentSubElementChain = [leaf]
+                currentSubElementRoles = [menuHit.role]
+                subElementDepth = 0
+                return
+            }
+        }
+
         let newRect = hit?.viewRect
         invalidate(from: currentRect, to: newRect ?? .zero)
         currentRect = newRect
         previousRect = newRect
         currentWindowID = hit?.windowID
+        // Menu bar / status item windows can't be reliably captured via
+        // SCK's per-window filter, so route them through the region path
+        // by stashing the rect here. mouseUp prefers `currentSubElementViewRect`
+        // over `currentWindowID` when both are present.
+        if let hit, hit.isOverlayWindow {
+            currentSubElementViewRect = hit.viewRect
+        } else {
+            currentSubElementViewRect = nil
+        }
+        currentSubElementChain = []
+        currentSubElementRoles = []
+        subElementDepth = 0
         if newRect == nil {
             setNeedsDisplay(bounds)
         }
+    }
+
+    /// Re-walk the AX tree under the cursor and replace `currentSubElementChain`.
+    /// Resets `subElementDepth` to 0 when the leaf moves to a different element
+    /// (different origin or significantly different size) so a new hover starts
+    /// from the smallest meaningful sub-window.
+    private func refreshSubElementChain(ownerPID: pid_t? = nil) {
+        guard let host else { return }
+        guard let cursorCG = CGEvent(source: nil)?.location else { return }
+        guard AXHitTester.ensureTrusted(prompt: true) else {
+            currentSubElementChain = []
+            currentSubElementRoles = []
+            if !axPermissionDenied {
+                axPermissionDenied = true
+                presentAXPermissionAlertIfNeeded()
+            }
+            return
+        }
+        axPermissionDenied = false
+        guard let chain = AXHitTester.chain(at: cursorCG, ownerPID: ownerPID), !chain.hits.isEmpty else {
+            currentSubElementChain = []
+            currentSubElementRoles = []
+            return
+        }
+
+        let viewRects = chain.hits.map { Self.appKitViewRect(fromCG: $0.cgRect, on: host.targetScreen) }
+        let roles = chain.hits.map { $0.role }
+
+        let leafChanged: Bool = {
+            guard let previousLeaf = currentSubElementChain.first,
+                  let newLeaf = viewRects.first else { return true }
+            return abs(previousLeaf.minX - newLeaf.minX) > 2 ||
+                   abs(previousLeaf.minY - newLeaf.minY) > 2 ||
+                   abs(previousLeaf.width - newLeaf.width) > 2 ||
+                   abs(previousLeaf.height - newLeaf.height) > 2
+        }()
+        if leafChanged {
+            subElementDepth = 0
+            scrollAccumulator = 0
+        }
+
+        currentSubElementChain = viewRects
+        currentSubElementRoles = roles
+        subElementDepth = min(subElementDepth, max(0, viewRects.count - 1))
+    }
+
+    private func currentSubElementRect() -> NSRect? {
+        guard !currentSubElementChain.isEmpty else { return nil }
+        let clamped = min(max(0, subElementDepth), currentSubElementChain.count - 1)
+        return currentSubElementChain[clamped]
+    }
+
+    /// One-shot NSAlert with a deeplink to the Accessibility pane. Stays
+    /// out of the way after the user has dismissed it once per overlay
+    /// session so the rest of the capture flow still works.
+    private func presentAXPermissionAlertIfNeeded() {
+        guard !axAlertShown else { return }
+        axAlertShown = true
+        DispatchQueue.main.async {
+            let alert = NSAlert()
+            alert.messageText = "Accessibility permission required"
+            alert.informativeText = "To pick a sub-window (e.g. VS Code's File Explorer), grant ClipboardKit access in System Settings → Privacy & Security → Accessibility, then try again."
+            alert.addButton(withTitle: "Open System Settings")
+            alert.addButton(withTitle: "Cancel")
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn,
+               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    /// Scroll wheel in sub-element mode walks the AX ancestor chain.
+    /// Scrolling UP climbs toward the window (larger panel), scrolling DOWN
+    /// returns to the deepest leaf. Lets users dial in the right granularity
+    /// for sub-windows like VS Code's File Explorer or the integrated panel.
+    override func scrollWheel(with event: NSEvent) {
+        guard captureMode == .window, optionHeld, !currentSubElementChain.isEmpty else {
+            super.scrollWheel(with: event)
+            return
+        }
+        scrollAccumulator += event.scrollingDeltaY
+        let threshold: CGFloat = 6
+        var changed = false
+        while scrollAccumulator >= threshold {
+            scrollAccumulator -= threshold
+            if subElementDepth < currentSubElementChain.count - 1 {
+                subElementDepth += 1
+                changed = true
+            }
+        }
+        while scrollAccumulator <= -threshold {
+            scrollAccumulator += threshold
+            if subElementDepth > 0 {
+                subElementDepth -= 1
+                changed = true
+            }
+        }
+        guard changed, let sub = currentSubElementRect() else { return }
+        invalidate(from: currentRect, to: sub)
+        currentRect = sub
+        previousRect = sub
+        currentSubElementViewRect = sub
+        currentWindowID = nil
+        setNeedsDisplay(bounds) // refresh hint label with new depth/role
     }
 
     private struct WindowHit {
         let windowID: CGWindowID
         /// Window bounds expressed in this overlay view's coordinate space.
         let viewRect: NSRect
+        /// True for windows above the normal layer (menu bar, status items,
+        /// Dock, etc.). SCK's per-window capture filter often refuses to
+        /// snapshot these, so mouseUp routes them through the region path
+        /// using `viewRect`.
+        let isOverlayWindow: Bool
+        /// PID of the process owning this CGWindow. The menu bar in modern
+        /// macOS is split across processes (foreground app for menu titles,
+        /// ControlCenter for status items), so the AX sub-element hit test
+        /// needs the owner to query the right tree.
+        let ownerPID: pid_t
     }
 
     /// Hit-test the window stack using CG global coordinates (cursor from
     /// `CGEvent`), then convert the matching window's CG rect back into this
-    /// overlay view's AppKit coords for the hover highlight.
+    /// overlay view's AppKit coords for the hover highlight. Walks the list
+    /// in front-to-back order; when several windows contain the cursor it
+    /// returns the smallest by area so menu bar status items (Wi-Fi, clock)
+    /// win over the full menu bar that visually contains them.
     private func windowUnderCursor() -> WindowHit? {
         guard let host else { return nil }
         guard let cursorCG = CGEvent(source: nil)?.location else { return nil }
@@ -549,12 +835,19 @@ final class SelectionView: NSView {
             return nil
         }
 
+        // Anything at or below the main-menu layer is fair game (regular
+        // windows = 0, Dock = 20, menu bar / status items = ~24–25). Higher
+        // layers belong to cursors, drag images, the screenshot HUD, etc.
+        let menuBarLayer = Int(CGWindowLevelForKey(.mainMenuWindow))
+
+        var best: (hit: WindowHit, area: CGFloat)?
         for info in rawList {
             guard let windowNumberInt = info[kCGWindowNumber as String] as? Int else { continue }
             if ignoredWindowNumbers.contains(windowNumberInt) { continue }
 
             if let alpha = info[kCGWindowAlpha as String] as? Double, alpha <= 0.01 { continue }
-            if let layer = info[kCGWindowLayer as String] as? Int, layer != 0 { continue }
+            let layer = (info[kCGWindowLayer as String] as? Int) ?? 0
+            if layer < 0 || layer > menuBarLayer { continue }
 
             guard let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
                   let x = (boundsDict["X"] as? NSNumber)?.doubleValue,
@@ -568,10 +861,27 @@ final class SelectionView: NSView {
 
             if windowBoundsCG.contains(cursorCG) {
                 let viewRect = Self.appKitViewRect(fromCG: windowBoundsCG, on: host.targetScreen)
-                return WindowHit(windowID: CGWindowID(windowNumberInt), viewRect: viewRect)
+                let area = windowBoundsCG.width * windowBoundsCG.height
+                let pid = (info[kCGWindowOwnerPID as String] as? pid_t) ?? 0
+                let hit = WindowHit(windowID: CGWindowID(windowNumberInt),
+                                    viewRect: viewRect,
+                                    isOverlayWindow: layer != 0,
+                                    ownerPID: pid)
+                if layer == 0 {
+                    // Regular windows respect z-order: first match wins,
+                    // matching the platform's normal hit test.
+                    return hit
+                }
+                // Overlay windows (menu bar / status items) overlap each
+                // other (the whole menu bar contains every individual
+                // status item). Keep the smallest so the user can aim at
+                // Wi-Fi instead of the entire bar.
+                if best == nil || area < best!.area {
+                    best = (hit, area)
+                }
             }
         }
-        return nil
+        return best?.hit
     }
 
     /// Convert a CG global rect (origin top-left of primary display) into the
@@ -590,7 +900,22 @@ final class SelectionView: NSView {
     override func mouseUp(with event: NSEvent) {
         guard let host = host else { return }
         if captureMode == .window {
+            optionHeld = event.modifierFlags.contains(.option)
             updateWindowSelectionFromCursor()
+            // ⌥ held: AX resolved a sub-window element. Capture that exact
+            // rect as a region — SCK's window filter would re-expand to the
+            // whole window, so we go through the region path instead.
+            if let subRect = currentSubElementViewRect {
+                let origin = host.targetScreen.frame.origin
+                let screenRect = NSRect(
+                    x: origin.x + subRect.origin.x,
+                    y: origin.y + subRect.origin.y,
+                    width: subRect.width,
+                    height: subRect.height
+                )
+                host.onFinish?(screenRect, host.targetScreen)
+                return
+            }
             guard let windowID = currentWindowID else {
                 host.onCancel?()
                 return
@@ -614,6 +939,15 @@ final class SelectionView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Paint the frozen screen snapshot first so the user can see
+        // everything beneath the overlay — including the menu bar — even
+        // though the overlay itself sits at shielding level.
+        if let snapshot, let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.saveGState()
+            ctx.draw(snapshot, in: bounds)
+            ctx.restoreGState()
+        }
+
         let dim = NSColor.black.withAlphaComponent(0.35)
         dim.setFill()
 
@@ -646,8 +980,20 @@ final class SelectionView: NSView {
     /// Floating "WxH" pill anchored just outside the selection (below if
     /// there's room, otherwise above) so the user can size precisely.
     private func drawSizeBadge(for sel: NSRect) {
-        guard captureMode == .region, sel.width >= 1, sel.height >= 1 else { return }
-        let label = "\(Int(sel.width.rounded())) × \(Int(sel.height.rounded()))"
+        // Show in region mode always, and in sub-element mode so the user
+        // can see how scroll-wheel depth changes the captured size.
+        let inSubMode = captureMode == .window && optionHeld && !currentSubElementChain.isEmpty
+        guard captureMode == .region || inSubMode, sel.width >= 1, sel.height >= 1 else { return }
+        var label = "\(Int(sel.width.rounded())) × \(Int(sel.height.rounded()))"
+        if inSubMode {
+            let depth = subElementDepth + 1
+            let total = currentSubElementChain.count
+            let role = currentSubElementRoles.indices.contains(subElementDepth)
+                ? (currentSubElementRoles[subElementDepth] ?? "")
+                : ""
+            let roleSuffix = role.isEmpty ? "" : " · \(role.replacingOccurrences(of: "AX", with: ""))"
+            label += "   [\(depth)/\(total)\(roleSuffix)]"
+        }
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
             .foregroundColor: NSColor.white
@@ -680,7 +1026,17 @@ final class SelectionView: NSView {
         case .region:
             hint = "Drag to select · Shift: square · ←→↑↓: nudge (⇧×10) · Space: Window mode · Esc: Cancel"
         case .window:
-            hint = "Window mode: move mouse to highlight, click to capture · Space: Region mode"
+            if optionHeld {
+                if axPermissionDenied {
+                    hint = "Accessibility permission required for sub-element mode — grant ClipboardKit in System Settings, then re-trigger the hotkey"
+                } else if currentSubElementChain.isEmpty {
+                    hint = "Sub-element mode (⌥): hover a panel · release ⌥ for whole window"
+                } else {
+                    hint = "Sub-element (⌥): scroll ↑↓ to resize (panel ↔ control) · click to capture · release ⌥ for whole window"
+                }
+            } else {
+                hint = "Window mode: click to capture whole window · hold ⌥ to pick a sub-element (e.g. File Explorer) · Space: Region mode"
+            }
         }
 
         let attrs: [NSAttributedString.Key: Any] = [
