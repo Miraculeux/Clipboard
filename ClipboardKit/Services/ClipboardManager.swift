@@ -331,6 +331,12 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         let digest = SHA256.hash(data: data)
         let hash = digest.map { String(format: "%02x", $0) }.joined()
 
+        // Consume CaptureOutput's one-shot "this image came from our own
+        // capture" hint. Reading-and-clearing here means the next pasted
+        // image (from another app) won't accidentally inherit the flag.
+        let isScreenshot = CaptureOutput.pendingScreenshotHint
+        CaptureOutput.pendingScreenshotHint = false
+
         return ClipboardItem(
             id: UUID(),
             timestamp: Date(),
@@ -340,7 +346,8 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             filePaths: nil,
             originalSize: data.count,
             sourceBundleID: sourceBundleID,
-            contentHash: hash
+            contentHash: hash,
+            isScreenshot: isScreenshot
         )
     }
 
@@ -883,7 +890,11 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                         ? base
                         : base.filter { typeFilter.matches($0) }
                 case .screenshots:
-                    categoryFiltered = history.filter { $0.contentType == .image }
+                    // Only show items captured through our own pipeline.
+                    // Legacy items (pre-flag) and pasted images go to the
+                    // Clipboard tab so the Screenshots tab is a true archive
+                    // of captures, not a generic image gallery.
+                    categoryFiltered = history.filter { $0.contentType == .image && $0.isScreenshot }
                 case .snippets:
                     categoryFiltered = []
                 }

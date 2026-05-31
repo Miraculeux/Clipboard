@@ -79,6 +79,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 AppDelegate.shared?.captureFullScreen()
             case .captureWindow:
                 AppDelegate.shared?.captureWindow()
+            case .repeatLastCapture:
+                ScreenshotCapture.shared.repeatLast()
             }
         }
 

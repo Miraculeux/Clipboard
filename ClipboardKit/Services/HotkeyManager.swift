@@ -8,6 +8,7 @@ enum HotkeyAction: Int, CaseIterable, Codable {
     case captureLongScreenshot = 3
     case captureFullScreen = 4
     case captureWindow = 5
+    case repeatLastCapture = 6
 
     var title: String {
         switch self {
@@ -16,6 +17,7 @@ enum HotkeyAction: Int, CaseIterable, Codable {
         case .captureLongScreenshot: return "Long (scrolling) screenshot"
         case .captureFullScreen: return "Capture full screen"
         case .captureWindow: return "Capture window"
+        case .repeatLastCapture: return "Repeat last capture"
         }
     }
 
@@ -34,6 +36,10 @@ enum HotkeyAction: Int, CaseIterable, Codable {
         case .captureWindow:
             // No default to avoid clashing with macOS's own ⌘⇧4 (Space);
             // users opt in.
+            return .disabled
+        case .repeatLastCapture:
+            // Off by default; users who want "snap the same area again" can
+            // bind it (e.g. ⌘⇧R).
             return .disabled
         }
     }

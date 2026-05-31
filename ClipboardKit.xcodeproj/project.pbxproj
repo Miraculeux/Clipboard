@@ -11,6 +11,7 @@
 		178EA6735E0FC4019DE12EA1 /* SnippetExpander.swift in Sources */ = {isa = PBXBuildFile; fileRef = 411C383A7C2C5CD7AF2739AF /* SnippetExpander.swift */; };
 		2DD50185C0D7BF1A8328E9E2 /* CaptureThumbnailHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30400DE41D1A03D1EF9C019 /* CaptureThumbnailHUD.swift */; };
 		314B94E3383902C70F6DF74C /* VisualEffectBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BF648489114CFCC7A8AECF4 /* VisualEffectBackground.swift */; };
+		336D9801519B0AE90DD5688C /* PinnedImageWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7F142D1116CCBBACA687FD1 /* PinnedImageWindow.swift */; };
 		38303E26AC04DA1ADC368D6B /* ImageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41B255ADB53DE0015F33716F /* ImageCache.swift */; };
 		408B992C91A73AF1DC20380E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 47305372BE80C56BBD73431E /* Assets.xcassets */; };
 		476669192EFE5BC1046258E9 /* LinkMetadataService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 993B1BB08933734DD647E5B1 /* LinkMetadataService.swift */; };
@@ -69,6 +70,7 @@
 		B2491F2FB844F2CB7BD99097 /* AppIconCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconCache.swift; sourceTree = "<group>"; };
 		B30400DE41D1A03D1EF9C019 /* CaptureThumbnailHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureThumbnailHUD.swift; sourceTree = "<group>"; };
 		B46DB1EE252AC42BD0C2ADC3 /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
+		B7F142D1116CCBBACA687FD1 /* PinnedImageWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnedImageWindow.swift; sourceTree = "<group>"; };
 		CA97271BCA5B36199301EAEA /* HotkeyRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotkeyRecorderView.swift; sourceTree = "<group>"; };
 		D0176AC6BBCFCAD30B6AC7B0 /* HistorySectionBucket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistorySectionBucket.swift; sourceTree = "<group>"; };
 		D65D08E56CD9F1EB3CA31CAE /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -108,6 +110,7 @@
 				993B1BB08933734DD647E5B1 /* LinkMetadataService.swift */,
 				FA7D66DCA1DDB2E2137EDC7E /* LongScreenshotCapture.swift */,
 				79005EBB86AE38708493C561 /* OCRService.swift */,
+				B7F142D1116CCBBACA687FD1 /* PinnedImageWindow.swift */,
 				95ED11AFBC038087D09E71CF /* ScreenRecordingPermission.swift */,
 				597ED65E3D159C6F6E1253D8 /* ScreenshotCapture.swift */,
 				B0E16280761262177924D6A4 /* SnippetAbbreviationExpander.swift */,
@@ -251,6 +254,7 @@
 				53B1E2A7FCE6A68203C1B0E5 /* LongScreenshotCapture.swift in Sources */,
 				7EFB5FFD7E125AAB260FE2CE /* OCRService.swift in Sources */,
 				D7417E22D48E4AC3852B2921 /* OnboardingView.swift in Sources */,
+				336D9801519B0AE90DD5688C /* PinnedImageWindow.swift in Sources */,
 				E792E24F80C6D537B9DC001D /* ScreenRecordingPermission.swift in Sources */,
 				60F4474ACA44BF3B462C0AF2 /* ScreenshotCapture.swift in Sources */,
 				8EF891A6D97B67BF867FE727 /* SettingsManager.swift in Sources */,

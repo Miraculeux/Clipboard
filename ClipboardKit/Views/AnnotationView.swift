@@ -103,6 +103,55 @@ enum AnnotationTool: String, CaseIterable {
     }
 }
 
+/// Background presets for the "Beautify" action. Each preset places the
+/// screenshot on a padded background with rounded corners and a soft drop
+/// shadow — the same UX as Xnapper/CleanShot's "Wallpaper"/"Background"
+/// modes. Add cases here to introduce new looks; the toolbar pull-down
+/// auto-populates from `allCases`.
+enum BeautifyPreset: Int, CaseIterable {
+    case gradientBlue = 0
+    case gradientSunset = 1
+    case gradientForest = 2
+    case gradientPeach = 3
+    case gradientGraphite = 4
+    case solidWhite = 5
+
+    var title: String {
+        switch self {
+        case .gradientBlue: return "Background: Ocean"
+        case .gradientSunset: return "Background: Sunset"
+        case .gradientForest: return "Background: Forest"
+        case .gradientPeach: return "Background: Peach"
+        case .gradientGraphite: return "Background: Graphite"
+        case .solidWhite: return "Background: White"
+        }
+    }
+
+    /// Two-colour stop the renderer uses for a top-left → bottom-right
+    /// linear gradient. Solid presets use the same colour twice.
+    var colors: (NSColor, NSColor) {
+        switch self {
+        case .gradientBlue:
+            return (NSColor(srgbRed: 0.20, green: 0.45, blue: 0.95, alpha: 1),
+                    NSColor(srgbRed: 0.45, green: 0.85, blue: 1.00, alpha: 1))
+        case .gradientSunset:
+            return (NSColor(srgbRed: 1.00, green: 0.45, blue: 0.40, alpha: 1),
+                    NSColor(srgbRed: 1.00, green: 0.78, blue: 0.45, alpha: 1))
+        case .gradientForest:
+            return (NSColor(srgbRed: 0.10, green: 0.55, blue: 0.40, alpha: 1),
+                    NSColor(srgbRed: 0.55, green: 0.85, blue: 0.55, alpha: 1))
+        case .gradientPeach:
+            return (NSColor(srgbRed: 0.97, green: 0.65, blue: 0.75, alpha: 1),
+                    NSColor(srgbRed: 1.00, green: 0.88, blue: 0.72, alpha: 1))
+        case .gradientGraphite:
+            return (NSColor(srgbRed: 0.18, green: 0.20, blue: 0.24, alpha: 1),
+                    NSColor(srgbRed: 0.36, green: 0.40, blue: 0.46, alpha: 1))
+        case .solidWhite:
+            return (.white, .white)
+        }
+    }
+}
+
 struct Annotation {
     var tool: AnnotationTool
     /// In image-pixel space (origin bottom-left, same as NSImage default).
@@ -347,10 +396,33 @@ private final class AnnotationViewController: NSViewController {
                                                       target: self,
                                                       action: #selector(applyTornBorderBlur))
         actionsStack.addArrangedSubview(tornBorderBlurBtn)
+
+        // "Beautify" pull-down: drops the screenshot on a colourful padded
+        // background with rounded corners + soft shadow (Xnapper-style).
+        let beautifyBtn = NSPopUpButton(frame: .zero, pullsDown: true)
+        beautifyBtn.bezelStyle = .rounded
+        beautifyBtn.imagePosition = .imageOnly
+        let beautifyMenuItem = NSMenuItem()
+        beautifyMenuItem.image = NSImage(systemSymbolName: "sparkles",
+                                          accessibilityDescription: "Beautify with background")
+        beautifyBtn.menu?.addItem(beautifyMenuItem)
+        for preset in BeautifyPreset.allCases {
+            let item = NSMenuItem(title: preset.title, action: #selector(beautifyTapped(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = preset.rawValue
+            beautifyBtn.menu?.addItem(item)
+        }
+        beautifyBtn.toolTip = "Beautify: padded gradient background with rounded corners + shadow"
+        actionsStack.addArrangedSubview(beautifyBtn)
+
         let ocrBtn = Self.makeActionButton(symbol: "text.viewfinder",
                                            label: "Recognize Text",
                                            target: self,
                                            action: #selector(recognizeText))
+        let exportBtn = Self.makeActionButton(symbol: "square.and.arrow.down",
+                                              label: "Export As… (PNG / JPEG / HEIC)",
+                                              target: self,
+                                              action: #selector(exportAs))
         let copyBtn = Self.makeActionButton(symbol: "doc.on.doc",
                                             label: "Copy to Clipboard (⌘C / ↩)",
                                             target: self,
@@ -358,6 +430,7 @@ private final class AnnotationViewController: NSViewController {
                                             tint: .controlAccentColor)
         copyBtn.keyEquivalent = "\r"
         actionsStack.addArrangedSubview(ocrBtn)
+        actionsStack.addArrangedSubview(exportBtn)
         actionsStack.addArrangedSubview(copyBtn)
         actionsStack.addArrangedSubview(NSView()) // tail spacer so the row stays left-aligned
 
@@ -474,6 +547,11 @@ private final class AnnotationViewController: NSViewController {
         canvas.applyBorderBlur(torn: true)
     }
 
+    @objc private func beautifyTapped(_ sender: NSMenuItem) {
+        guard let preset = BeautifyPreset(rawValue: sender.tag) else { return }
+        canvas.applyBeautify(preset: preset)
+    }
+
     /// Crop in-place so undo can restore the previous image+annotations.
     /// The canvas owns the actual mutation; we just forward the rect.
     private func applyCrop(displayRect: NSRect) {
@@ -495,6 +573,77 @@ private final class AnnotationViewController: NSViewController {
         guard let data = canvas.flattenedPNG() else { NSSound.beep(); return }
         CaptureOutput.shared.deliver(pngData: data, showThumbnail: false)
         ToastCenter.shared.show("Copied to clipboard")
+    }
+
+    /// Show NSSavePanel with a PNG/JPEG/HEIC format picker and a quality
+    /// slider (greyed out for PNG which is lossless). Encodes from the
+    /// flattened canvas at native pixel resolution.
+    @objc private func exportAs() {
+        guard let pngData = canvas.flattenedPNG() else { NSSound.beep(); return }
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.title = "Export Screenshot"
+        let stamp = Self.exportFilenameFormatter.string(from: Date())
+        panel.nameFieldStringValue = "Screenshot \(stamp).png"
+        panel.allowedContentTypes = [.png, .jpeg, .heic]
+
+        let accessory = ExportAccessoryView()
+        accessory.onFormatChange = { format in
+            let base = (panel.nameFieldStringValue as NSString).deletingPathExtension
+            panel.nameFieldStringValue = "\(base).\(format.fileExtension)"
+            panel.allowedContentTypes = [format.uti]
+        }
+        panel.accessoryView = accessory
+
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            guard let self else { return }
+            let format = accessory.selectedFormat
+            let quality = accessory.qualityValue
+            let data: Data?
+            switch format {
+            case .png:
+                data = pngData
+            case .jpeg:
+                data = Self.encodeJPEG(from: pngData, quality: quality)
+            case .heic:
+                data = Self.encodeHEIC(from: pngData, quality: quality)
+            }
+            guard let payload = data else {
+                NSSound.beep(); return
+            }
+            do {
+                try payload.write(to: url)
+                ToastCenter.shared.show("Exported \(format.shortName)")
+            } catch {
+                NSSound.beep()
+            }
+        }
+    }
+
+    private static let exportFilenameFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        return f
+    }()
+
+    private static func encodeJPEG(from pngData: Data, quality: CGFloat) -> Data? {
+        guard let rep = NSBitmapImageRep(data: pngData) else { return nil }
+        return rep.representation(using: .jpeg, properties: [.compressionFactor: NSNumber(value: Double(quality))])
+    }
+
+    private static func encodeHEIC(from pngData: Data, quality: CGFloat) -> Data? {
+        // Re-encode through ImageIO so we get a real HEIF/HEIC file rather
+        // than just a renamed PNG. macOS 26 ships HEIC writer support.
+        guard let src = CGImageSourceCreateWithData(pngData as CFData, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, "public.heic" as CFString, 1, nil) else { return nil }
+        let opts: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
+        CGImageDestinationAddImage(dest, cg, opts as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
     }
 
     @objc private func recognizeText() {
@@ -850,6 +999,89 @@ private final class AnnotationCanvasView: NSView {
                        operation: .sourceOver,
                        fraction: 1.0)
         }
+
+        NSGraphicsContext.restoreGraphicsState()
+
+        let framed = NSImage(size: newSize)
+        framed.addRepresentation(rep)
+
+        performMutation {
+            self.image = framed
+            self.annotations.removeAll()
+            self.blurredImageCache = nil
+        }
+    }
+
+    /// Drop the screenshot onto a padded, gradient-coloured background with
+    /// rounded corners and a soft drop shadow — the same UX as Xnapper /
+    /// CleanShot's "Background" mode. Undoable. Output is the union of the
+    /// padding + the screenshot, at native pixel resolution.
+    func applyBeautify(preset: BeautifyPreset) {
+        guard let baked = bakedImage() else { NSSound.beep(); return }
+        let bakedSize = baked.size
+        let shorter = min(bakedSize.width, bakedSize.height)
+        // Padding ~12% of shorter side feels right at common screen sizes
+        // (small screenshots get proportionally more breathing room).
+        let pad = max(48, floor(shorter * 0.12))
+        let cornerRadius = max(6, floor(shorter * 0.012))
+        let newSize = NSSize(width: bakedSize.width + pad * 2,
+                             height: bakedSize.height + pad * 2)
+        let imageRect = NSRect(x: pad, y: pad,
+                               width: bakedSize.width, height: bakedSize.height)
+
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(newSize.width),
+            pixelsHigh: Int(newSize.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { NSSound.beep(); return }
+        rep.size = newSize
+
+        NSGraphicsContext.saveGraphicsState()
+        guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else {
+            NSGraphicsContext.restoreGraphicsState()
+            NSSound.beep()
+            return
+        }
+        NSGraphicsContext.current = ctx
+
+        // 1. Gradient (or solid) background filling the whole canvas.
+        let (c1, c2) = preset.colors
+        let bgRect = NSRect(origin: .zero, size: newSize)
+        if c1 == c2 {
+            c1.setFill()
+            bgRect.fill()
+        } else {
+            let gradient = NSGradient(starting: c1, ending: c2)
+            // 135° gives a tasteful top-left → bottom-right sweep.
+            gradient?.draw(in: bgRect, angle: 315)
+        }
+
+        // 2. Drop shadow under the screenshot. Negative Y in CG (Y-up)
+        // pushes the shadow toward the visible bottom edge.
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
+        shadow.shadowBlurRadius = max(12, pad * 0.35)
+        shadow.shadowOffset = NSSize(width: 0, height: -max(6, pad * 0.12))
+        shadow.set()
+
+        // 3. Foreground screenshot, clipped to a rounded rect so the corners
+        // match the modern macOS window aesthetic. The shadow above traces
+        // the rounded silhouette because it's applied to the transparency
+        // layer's final alpha.
+        let clipPath = NSBezierPath(roundedRect: imageRect,
+                                    xRadius: cornerRadius,
+                                    yRadius: cornerRadius)
+        ctx.cgContext.beginTransparencyLayer(auxiliaryInfo: nil)
+        clipPath.addClip()
+        baked.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+        ctx.cgContext.endTransparencyLayer()
 
         NSGraphicsContext.restoreGraphicsState()
 
@@ -1541,5 +1773,119 @@ final class CustomColorPickerButton: NSControl {
                                      y: center.y - outerRadius + 0.25,
                                      width: outerRadius * 2 - 0.5,
                                      height: outerRadius * 2 - 0.5))
+    }
+}
+
+// MARK: - Export accessory view
+
+import UniformTypeIdentifiers
+
+/// Format picker + quality slider used as `NSSavePanel.accessoryView` when
+/// exporting an annotated screenshot.
+private final class ExportAccessoryView: NSView {
+    enum Format: Int {
+        case png = 0
+        case jpeg = 1
+        case heic = 2
+
+        var fileExtension: String {
+            switch self {
+            case .png: return "png"
+            case .jpeg: return "jpg"
+            case .heic: return "heic"
+            }
+        }
+
+        var uti: UTType {
+            switch self {
+            case .png: return .png
+            case .jpeg: return .jpeg
+            case .heic: return .heic
+            }
+        }
+
+        var shortName: String {
+            switch self {
+            case .png: return "PNG"
+            case .jpeg: return "JPEG"
+            case .heic: return "HEIC"
+            }
+        }
+
+        var supportsQuality: Bool { self != .png }
+    }
+
+    var onFormatChange: ((Format) -> Void)?
+    private(set) var selectedFormat: Format = .png
+    private(set) var qualityValue: CGFloat = 0.9
+
+    private let formatPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let qualitySlider = NSSlider(value: 0.9, minValue: 0.1, maxValue: 1.0,
+                                          target: nil, action: nil)
+    private let qualityLabel = NSTextField(labelWithString: "Quality: 90%")
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 360, height: 64))
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let formatLabel = NSTextField(labelWithString: "Format:")
+        formatLabel.font = .systemFont(ofSize: 12)
+
+        formatPopup.addItems(withTitles: ["PNG (lossless)", "JPEG", "HEIC"])
+        formatPopup.target = self
+        formatPopup.action = #selector(formatChanged)
+
+        qualitySlider.target = self
+        qualitySlider.action = #selector(qualityChanged)
+        qualitySlider.numberOfTickMarks = 10
+        qualitySlider.allowsTickMarkValuesOnly = false
+        qualitySlider.isEnabled = false
+
+        qualityLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        qualityLabel.textColor = .secondaryLabelColor
+        qualityLabel.isEnabled = false
+
+        let row1 = NSStackView(views: [formatLabel, formatPopup])
+        row1.orientation = .horizontal
+        row1.spacing = 8
+        row1.alignment = .centerY
+        row1.translatesAutoresizingMaskIntoConstraints = false
+
+        let row2 = NSStackView(views: [qualityLabel, qualitySlider])
+        row2.orientation = .horizontal
+        row2.spacing = 10
+        row2.alignment = .centerY
+        row2.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView(views: [row1, row2])
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.alignment = .leading
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            qualitySlider.widthAnchor.constraint(equalToConstant: 200)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func formatChanged() {
+        let format = Format(rawValue: formatPopup.indexOfSelectedItem) ?? .png
+        selectedFormat = format
+        let enabled = format.supportsQuality
+        qualitySlider.isEnabled = enabled
+        qualityLabel.isEnabled = enabled
+        onFormatChange?(format)
+    }
+
+    @objc private func qualityChanged() {
+        qualityValue = CGFloat(qualitySlider.doubleValue)
+        qualityLabel.stringValue = "Quality: \(Int((qualityValue * 100).rounded()))%"
     }
 }

@@ -99,6 +99,7 @@ private final class ThumbnailPanel: NSPanel {
         container.onClick = { [weak self] in self?.openAnnotator() }
         container.onClose = { [weak self] in self?.onDismissRequested?() }
         container.onReveal = { [weak self] in self?.revealInFinder() }
+        container.onPin = { [weak self] in self?.pinFloatingCopy() }
         self.contentView = container
     }
 
@@ -117,6 +118,12 @@ private final class ThumbnailPanel: NSPanel {
         guard let url = savedURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
+
+    private func pinFloatingCopy() {
+        guard let image = container.image else { return }
+        onDismissRequested?()
+        PinnedImageWindow.pin(image: image)
+    }
 }
 
 // MARK: - Container view
@@ -132,10 +139,12 @@ private final class ThumbnailContainerView: NSView, NSDraggingSource {
     var onClick: (() -> Void)?
     var onClose: (() -> Void)?
     var onReveal: (() -> Void)?
+    var onPin: (() -> Void)?
 
     private let imageView = NSImageView()
     private let closeButton = NSButton()
     private let revealButton = NSButton()
+    private let pinButton = NSButton()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -172,6 +181,17 @@ private final class ThumbnailContainerView: NSView, NSDraggingSource {
         revealButton.target = self
         revealButton.action = #selector(revealTapped)
         addSubview(revealButton)
+
+        pinButton.bezelStyle = .circular
+        pinButton.title = ""
+        pinButton.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Pin to screen")
+        pinButton.isBordered = false
+        pinButton.frame = NSRect(x: 28, y: bounds.height - 24, width: 20, height: 20)
+        pinButton.autoresizingMask = [.maxXMargin, .minYMargin]
+        pinButton.target = self
+        pinButton.action = #selector(pinTapped)
+        pinButton.toolTip = "Pin floating copy on screen"
+        addSubview(pinButton)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -180,7 +200,7 @@ private final class ThumbnailContainerView: NSView, NSDraggingSource {
     /// their own action so a click on ✕ won't bubble.
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if closeButton.frame.contains(p) || revealButton.frame.contains(p) {
+        if closeButton.frame.contains(p) || revealButton.frame.contains(p) || pinButton.frame.contains(p) {
             super.mouseDown(with: event)
             return
         }
@@ -248,5 +268,9 @@ private final class ThumbnailContainerView: NSView, NSDraggingSource {
 
     @objc private func revealTapped() {
         onReveal?()
+    }
+
+    @objc private func pinTapped() {
+        onPin?()
     }
 }

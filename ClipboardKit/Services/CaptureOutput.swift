@@ -11,6 +11,14 @@ import AppKit
 final class CaptureOutput: @unchecked Sendable {
     nonisolated(unsafe) static let shared = CaptureOutput()
 
+    /// One-shot hint that the next PNG to land on the pasteboard came from
+    /// our capture pipeline (region/window/full-screen/long screenshot).
+    /// `ClipboardManager.saveImageItem` reads + clears this so the resulting
+    /// `ClipboardItem.isScreenshot` is true, which the Screenshots tab uses
+    /// to hide unrelated pasted images. Single-shot to avoid a stale flag
+    /// leaking onto the next unrelated paste.
+    nonisolated(unsafe) static var pendingScreenshotHint: Bool = false
+
     private init() {}
 
     private static let filenameFormatter: DateFormatter = {
@@ -29,7 +37,11 @@ final class CaptureOutput: @unchecked Sendable {
     ///   - showThumbnail: Set to `false` when the source itself is the HUD
     ///     or annotator (avoids a second floating thumbnail on top of itself).
     func deliver(pngData: Data, image: NSImage? = nil, showThumbnail: Bool = true) {
-        // 1) Clipboard
+        // 1) Clipboard — set the screenshot hint BEFORE pushing data so the
+        // ClipboardManager pasteboard observer that fires synchronously
+        // afterwards can pick it up. The flag is single-shot; it gets
+        // cleared by the consumer.
+        Self.pendingScreenshotHint = true
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setData(pngData, forType: .png)

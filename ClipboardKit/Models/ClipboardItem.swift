@@ -65,6 +65,11 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     /// duplicate. `nil` for non-image items or items captured before this
     /// field shipped.
     var contentHash: String?
+    /// True when this image entered the history through our own capture
+    /// pipeline (region/window/full-screen/long screenshot) rather than via
+    /// a plain copy from another app. Used by the Screenshots tab to hide
+    /// images that are merely on the pasteboard but aren't captures.
+    var isScreenshot: Bool
 
     enum ContentType: String, Codable {
         case text
@@ -83,7 +88,8 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
          isPinned: Bool = false,
          linkPreview: LinkPreview? = nil,
          sourceBundleID: String? = nil,
-         contentHash: String? = nil) {
+         contentHash: String? = nil,
+         isScreenshot: Bool = false) {
         self.id = id
         self.timestamp = timestamp
         self.contentType = contentType
@@ -95,6 +101,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.linkPreview = linkPreview
         self.sourceBundleID = sourceBundleID
         self.contentHash = contentHash
+        self.isScreenshot = isScreenshot
     }
 
     /// Custom decoder so payloads written before `isPinned` / `linkPreview` /
@@ -103,7 +110,8 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     /// conformance.
     private enum CodingKeys: String, CodingKey {
         case id, timestamp, contentType, textContent, fileName, filePaths,
-             originalSize, isPinned, linkPreview, sourceBundleID, contentHash
+             originalSize, isPinned, linkPreview, sourceBundleID, contentHash,
+             isScreenshot
     }
 
     init(from decoder: Decoder) throws {
@@ -119,6 +127,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.linkPreview = try c.decodeIfPresent(LinkPreview.self, forKey: .linkPreview)
         self.sourceBundleID = try c.decodeIfPresent(String.self, forKey: .sourceBundleID)
         self.contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
+        self.isScreenshot = try c.decodeIfPresent(Bool.self, forKey: .isScreenshot) ?? false
     }
 
     var displayText: String {

@@ -18,6 +18,18 @@ final class ScreenshotCapture: @unchecked Sendable {
     /// macOS does not keep popping its own TCC prompt on every hotkey press.
     private var authDenied = false
 
+    /// Tracks the most recent successful capture so the user can re-trigger
+    /// it with the `repeatLastCapture` hotkey. Region/window-rect captures
+    /// store the screen-coords rect so we can snap the same area again
+    /// without the selection overlay; window-mode captures record the
+    /// CGWindowID so we can re-snapshot that exact window.
+    private enum LastCapture {
+        case region(NSRect, NSScreen)
+        case windowID(CGWindowID, NSScreen)
+        case fullScreen(NSScreen)
+    }
+    private var lastCapture: LastCapture?
+
     private init() {}
 
     /// Show the selection overlay across every screen. No-op if already active.
@@ -69,6 +81,7 @@ final class ScreenshotCapture: @unchecked Sendable {
     private func _captureFullScreen() async {
         if authDenied { NSSound.beep(); return }
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        lastCapture = .fullScreen(screen)
         guard let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
             NSSound.beep()
             return
@@ -152,6 +165,14 @@ final class ScreenshotCapture: @unchecked Sendable {
         // Exclude all overlay windows from window-pick hit testing.
         let overlayWindowNumbers = Set(overlayWindows.map { $0.windowNumber })
         overlayWindows.forEach { $0.ignoredWindowNumbers = overlayWindowNumbers }
+
+        // Snapshot of every visible app window's rect (CG global coords) for
+        // edge-snapping in region mode. Captured once now so the snap stays
+        // stable while the user drags (the live window list shifts when
+        // the overlay activates).
+        let snapTargets = Self.snappableWindowRects(excluding: overlayWindowNumbers)
+        overlayWindows.forEach { $0.installSnapTargets(snapTargets) }
+
         overlayWindows.forEach { $0.orderFrontRegardless() }
 
         // Optionally drop straight into window-pick mode so the user doesn't
@@ -192,6 +213,39 @@ final class ScreenshotCapture: @unchecked Sendable {
         }
     }
 
+    /// Snapshot of every visible normal-layer window's bounds (in CG global
+    /// coords, top-left origin) for region-mode edge snapping. Filters out
+    /// our overlay windows, tiny tooltips, and full-screen-ish surfaces
+    /// (anything covering >95% of any display) so the user can still drag
+    /// freely over the wallpaper.
+    private static func snappableWindowRects(excluding overlayWindowNumbers: Set<Int>) -> [CGRect] {
+        guard let raw = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else { return [] }
+
+        let screenAreas: [CGFloat] = NSScreen.screens.map { $0.frame.width * $0.frame.height }
+        var rects: [CGRect] = []
+        for info in raw {
+            if let n = info[kCGWindowNumber as String] as? Int, overlayWindowNumbers.contains(n) { continue }
+            if let alpha = info[kCGWindowAlpha as String] as? Double, alpha <= 0.05 { continue }
+            // Skip menu-bar/Dock/status windows — they live above layer 0
+            // and snapping the selection to them is rarely what the user
+            // wants. The normal-app windows we want are all layer 0.
+            if let layer = info[kCGWindowLayer as String] as? Int, layer != 0 { continue }
+            guard let bd = info[kCGWindowBounds as String] as? [String: Any],
+                  let x = (bd["X"] as? NSNumber)?.doubleValue,
+                  let y = (bd["Y"] as? NSNumber)?.doubleValue,
+                  let w = (bd["Width"] as? NSNumber)?.doubleValue,
+                  let h = (bd["Height"] as? NSNumber)?.doubleValue else { continue }
+            if w < 60 || h < 40 { continue }
+            let area = w * h
+            if screenAreas.contains(where: { area > $0 * 0.95 }) { continue }
+            rects.append(CGRect(x: x, y: y, width: w, height: h))
+        }
+        return rects
+    }
+
     /// User pressed ESC or made a zero-sized selection. Tear down without capturing.
     func cancel() {
         teardown()
@@ -203,6 +257,7 @@ final class ScreenshotCapture: @unchecked Sendable {
     @MainActor
     func finish(with screenRect: NSRect, on targetScreen: NSScreen) {
         teardown()
+        lastCapture = .region(screenRect, targetScreen)
         // Give the windows a moment to actually disappear from the compositor
         // before snapping the screen, otherwise the dim overlay would be captured.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -218,10 +273,29 @@ final class ScreenshotCapture: @unchecked Sendable {
     @MainActor
     func finishWindow(id windowID: CGWindowID, on targetScreen: NSScreen) {
         teardown()
+        lastCapture = .windowID(windowID, targetScreen)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             Task { @MainActor in
                 await self.captureWindowAndCopy(windowID: windowID, screen: targetScreen)
             }
+        }
+    }
+
+    /// Re-run the most recent successful capture without showing the
+    /// selection overlay (or window picker). Useful for snapping the same
+    /// area of a UI repeatedly during testing/comparison.
+    func repeatLast() {
+        guard let last = lastCapture else {
+            DispatchQueue.main.async { NSSound.beep() }
+            return
+        }
+        switch last {
+        case .region(let rect, let screen):
+            Task { @MainActor in await self.captureAndCopy(screenRect: rect, screen: screen) }
+        case .windowID(let id, let screen):
+            Task { @MainActor in await self.captureWindowAndCopy(windowID: id, screen: screen) }
+        case .fullScreen:
+            Task { @MainActor in await self._captureFullScreen() }
         }
     }
 
@@ -415,6 +489,16 @@ final class SelectionWindow: NSWindow {
         view.setCaptureMode(mode)
     }
 
+    /// Hand the selection view a snapshot of every snap-target window so
+    /// region drags can magnetically align with window edges. Caller passes
+    /// CG global rects; we convert into view-local coords once here.
+    func installSnapTargets(_ cgRects: [CGRect]) {
+        guard let view = contentView as? SelectionView else { return }
+        view.snapTargets = cgRects.map {
+            SelectionView.appKitViewRect(fromCG: $0, on: targetScreen)
+        }
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 { // ESC
             onCancel?()
@@ -422,6 +506,16 @@ final class SelectionWindow: NSWindow {
         }
         if event.keyCode == 49 { // Space
             (contentView as? SelectionView)?.toggleCaptureMode()
+            return
+        }
+        // C: copy the pixel color under the cursor to clipboard as HEX,
+        // then dismiss the overlay so the user can paste it. Works in
+        // region mode only (loupe is region-only).
+        if event.keyCode == 8, // 'c'
+           let view = contentView as? SelectionView,
+           view.copyColorUnderCursor() {
+            ToastCenter.shared.show("Color copied")
+            onCancel?()
             return
         }
         if let view = contentView as? SelectionView,
@@ -445,6 +539,14 @@ final class SelectionView: NSView {
     /// reveals the menu bar and any windows beneath the shielding-level
     /// overlay.
     var snapshot: CGImage?
+    /// Bounding rects of snappable windows in this view's coordinate space.
+    /// Used by region-mode drag to magnetically align the selection's
+    /// endpoint with window edges (hold ⌥ to disable).
+    var snapTargets: [NSRect] = []
+    /// Cursor position in this view's AppKit coords — used to draw the
+    /// magnifier loupe in region mode. nil when the cursor isn't in the
+    /// view yet (overlay just appeared) so we don't render a stale loupe.
+    private var cursorPoint: NSPoint?
 
     private var captureMode: CaptureMode = .region
 
@@ -557,7 +659,10 @@ final class SelectionView: NSView {
             updateWindowSelectionFromCursor()
             return
         }
-        let p = convert(event.locationInWindow, from: nil)
+        var p = convert(event.locationInWindow, from: nil)
+        if !event.modifierFlags.contains(.option) {
+            p = snappedPoint(p)
+        }
         startPoint = p
         let newRect = NSRect(origin: p, size: .zero)
         invalidate(from: currentRect, to: newRect)
@@ -568,13 +673,46 @@ final class SelectionView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard captureMode == .region else { return }
         guard let start = startPoint else { return }
-        let p = convert(event.locationInWindow, from: nil)
+        var p = convert(event.locationInWindow, from: nil)
+        let oldCursor = cursorPoint
+        cursorPoint = p
         let constrained = event.modifierFlags.contains(.shift)
+        let disableSnap = event.modifierFlags.contains(.option)
+        // Magnetic snap: nudge the drag endpoint to a nearby window edge
+        // unless the user is holding ⌥ (escape hatch) or ⇧ (which already
+        // locks the rect to a square — snapping would fight that).
+        if !disableSnap && !constrained {
+            p = snappedPoint(p)
+        }
         let newRect = constrained ? Self.squareRect(from: start, to: p)
                                   : Self.rect(from: start, to: p)
         invalidate(from: previousRect, to: newRect)
+        invalidateLoupe(around: oldCursor)
+        invalidateLoupe(around: p)
         currentRect = newRect
         previousRect = newRect
+    }
+
+    /// Pull `point` to the nearest snappable window edge if within the
+    /// snap threshold. Snaps X and Y independently so dragging along one
+    /// axis still snaps the other.
+    private func snappedPoint(_ point: NSPoint) -> NSPoint {
+        guard !snapTargets.isEmpty else { return point }
+        let threshold: CGFloat = 8
+        var result = point
+        var bestDX: CGFloat = threshold
+        var bestDY: CGFloat = threshold
+        for r in snapTargets {
+            for xEdge in [r.minX, r.maxX] {
+                let dx = abs(point.x - xEdge)
+                if dx < bestDX { bestDX = dx; result.x = xEdge }
+            }
+            for yEdge in [r.minY, r.maxY] {
+                let dy = abs(point.y - yEdge)
+                if dy < bestDY { bestDY = dy; result.y = yEdge }
+            }
+        }
+        return result
     }
 
     /// Arrow keys nudge the current selection while in region mode. Shift
@@ -617,7 +755,16 @@ final class SelectionView: NSView {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        guard captureMode == .window else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        let oldCursor = cursorPoint
+        cursorPoint = p
+        if captureMode == .region {
+            // Loupe follows the cursor; mark the old and new loupe regions
+            // dirty so the rest of the overlay isn't re-rendered.
+            invalidateLoupe(around: oldCursor)
+            invalidateLoupe(around: p)
+            return
+        }
         optionHeld = event.modifierFlags.contains(.option)
         updateWindowSelectionFromCursor()
     }
@@ -886,7 +1033,7 @@ final class SelectionView: NSView {
 
     /// Convert a CG global rect (origin top-left of primary display) into the
     /// overlay view's AppKit coordinates (origin bottom-left of `screen`).
-    private static func appKitViewRect(fromCG cgRect: CGRect, on screen: NSScreen) -> NSRect {
+    fileprivate static func appKitViewRect(fromCG cgRect: CGRect, on screen: NSScreen) -> NSRect {
         let primaryHeight = NSScreen.screens.first?.frame.height ?? screen.frame.height
         let appKitGlobalY = primaryHeight - (cgRect.origin.y + cgRect.height)
         return NSRect(
@@ -954,6 +1101,7 @@ final class SelectionView: NSView {
         guard let sel = currentRect, sel.width > 0, sel.height > 0 else {
             bounds.fill()
             drawHint()
+            drawLoupe()
             return
         }
 
@@ -975,6 +1123,7 @@ final class SelectionView: NSView {
 
         drawSizeBadge(for: sel)
         drawHint()
+        drawLoupe()
     }
 
     /// Floating "WxH" pill anchored just outside the selection (below if
@@ -1024,7 +1173,7 @@ final class SelectionView: NSView {
         let hint: String
         switch captureMode {
         case .region:
-            hint = "Drag to select · Shift: square · ←→↑↓: nudge (⇧×10) · Space: Window mode · Esc: Cancel"
+            hint = "Drag to select · Shift: square · ⌥: disable snap · C: copy color · Space: Window mode · Esc: Cancel"
         case .window:
             if optionHeld {
                 if axPermissionDenied {
@@ -1047,6 +1196,176 @@ final class SelectionView: NSView {
         let size = text.size()
         let origin = NSPoint(x: 16, y: bounds.height - size.height - 16)
         text.draw(at: origin)
+    }
+
+    // MARK: - Loupe / color picker
+
+    /// Side length of the on-screen loupe square (points).
+    private static let loupeSize: CGFloat = 130
+    /// How many source pixels the loupe samples per side (odd so a single
+    /// pixel sits exactly under the crosshair).
+    private static let loupePixelGrid: Int = 15
+    /// Vertical offset from the cursor so the loupe doesn't sit on top of it.
+    private static let loupeOffset: CGFloat = 20
+
+    /// Sample the underlying snapshot pixel under the cursor and return its
+    /// color, plus the bounding rect the loupe occupies (used to invalidate
+    /// only the affected area on cursor move).
+    private func loupeFrame(for cursor: NSPoint) -> NSRect {
+        let size = Self.loupeSize
+        // Prefer drawing above-right of the cursor; fall back when near
+        // top/right edges.
+        var origin = NSPoint(x: cursor.x + Self.loupeOffset,
+                             y: cursor.y + Self.loupeOffset)
+        if origin.x + size > bounds.width - 8 {
+            origin.x = cursor.x - Self.loupeOffset - size
+        }
+        if origin.y + size + 28 > bounds.height - 8 { // 28 = info bar below
+            origin.y = cursor.y - Self.loupeOffset - size - 28
+        }
+        // Total footprint includes the info bar drawn under the loupe.
+        return NSRect(x: origin.x, y: origin.y - 28, width: size, height: size + 28)
+    }
+
+    private func invalidateLoupe(around cursor: NSPoint?) {
+        guard captureMode == .region, let cursor else { return }
+        let frame = loupeFrame(for: cursor).insetBy(dx: -2, dy: -2)
+        setNeedsDisplay(frame.intersection(bounds))
+    }
+
+    /// Read a single pixel from the frozen snapshot at the AppKit point.
+    private func pixelColor(at viewPoint: NSPoint) -> NSColor? {
+        guard let snapshot else { return nil }
+        let scaleX = CGFloat(snapshot.width) / bounds.width
+        let scaleY = CGFloat(snapshot.height) / bounds.height
+        // Snapshot pixels are top-left origin; our view is bottom-left.
+        let px = Int((viewPoint.x * scaleX).rounded(.down))
+        let py = Int(((bounds.height - viewPoint.y) * scaleY).rounded(.down))
+        guard px >= 0, py >= 0, px < snapshot.width, py < snapshot.height else { return nil }
+
+        var pixel: [UInt8] = [0, 0, 0, 0]
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: &pixel,
+                                  width: 1, height: 1,
+                                  bitsPerComponent: 8, bytesPerRow: 4,
+                                  space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.draw(snapshot, in: CGRect(x: -px, y: -(snapshot.height - 1 - py), width: snapshot.width, height: snapshot.height))
+        return NSColor(srgbRed: CGFloat(pixel[0]) / 255.0,
+                       green: CGFloat(pixel[1]) / 255.0,
+                       blue: CGFloat(pixel[2]) / 255.0,
+                       alpha: 1.0)
+    }
+
+    /// Magnifier loupe + center pixel readout, drawn near the cursor in
+    /// region mode. Pulls pixels from the frozen `snapshot` so it has no
+    /// frame-rate cost from re-querying the live screen.
+    private func drawLoupe() {
+        guard captureMode == .region, let cursor = cursorPoint, let snapshot else { return }
+        let frame = loupeFrame(for: cursor)
+        let size = Self.loupeSize
+        let loupeRect = NSRect(x: frame.minX, y: frame.minY + 28, width: size, height: size)
+
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.saveGState()
+
+        // Source rect on the snapshot: a small square centered on the cursor.
+        let scaleX = CGFloat(snapshot.width) / bounds.width
+        let scaleY = CGFloat(snapshot.height) / bounds.height
+        let grid = CGFloat(Self.loupePixelGrid)
+        let srcW = grid * scaleX
+        let srcH = grid * scaleY
+        // Snapshot is top-origin; our view is bottom-origin.
+        let srcX = (cursor.x * scaleX) - srcW / 2
+        let srcY = ((bounds.height - cursor.y) * scaleY) - srcH / 2
+        guard let cropped = snapshot.cropping(to: CGRect(x: srcX, y: srcY, width: srcW, height: srcH).integral) else {
+            ctx.restoreGState(); return
+        }
+
+        // Clip to a rounded square so the loupe looks tidy.
+        let clip = NSBezierPath(roundedRect: loupeRect, xRadius: 8, yRadius: 8)
+        clip.addClip()
+
+        // Draw the magnified pixels with nearest-neighbour interpolation
+        // so individual pixels read as crisp squares.
+        ctx.interpolationQuality = .none
+        ctx.draw(cropped, in: loupeRect)
+
+        // Pixel grid lines (subtle, only every pixel boundary).
+        let pxSize = size / grid
+        ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.12).cgColor)
+        ctx.setLineWidth(0.5)
+        for i in 1..<Int(grid) {
+            let p = CGFloat(i) * pxSize
+            ctx.move(to: CGPoint(x: loupeRect.minX + p, y: loupeRect.minY))
+            ctx.addLine(to: CGPoint(x: loupeRect.minX + p, y: loupeRect.maxY))
+            ctx.move(to: CGPoint(x: loupeRect.minX, y: loupeRect.minY + p))
+            ctx.addLine(to: CGPoint(x: loupeRect.maxX, y: loupeRect.minY + p))
+        }
+        ctx.strokePath()
+
+        // Highlight the centre pixel — that's the one whose color we report.
+        let centerPx = NSRect(
+            x: loupeRect.minX + pxSize * floor(grid / 2),
+            y: loupeRect.minY + pxSize * floor(grid / 2),
+            width: pxSize, height: pxSize
+        )
+        ctx.setStrokeColor(NSColor.white.cgColor)
+        ctx.setLineWidth(1.5)
+        ctx.stroke(centerPx)
+
+        ctx.restoreGState()
+
+        // Outer border + drop shadow base.
+        ctx.saveGState()
+        let border = NSBezierPath(roundedRect: loupeRect.insetBy(dx: -0.5, dy: -0.5), xRadius: 8, yRadius: 8)
+        NSColor.white.withAlphaComponent(0.9).setStroke()
+        border.lineWidth = 1
+        border.stroke()
+        ctx.restoreGState()
+
+        // Info bar below the loupe: swatch + HEX + RGB + coord.
+        if let color = pixelColor(at: cursor) {
+            let infoRect = NSRect(x: frame.minX, y: frame.minY, width: size, height: 24)
+            NSColor.black.withAlphaComponent(0.78).setFill()
+            NSBezierPath(roundedRect: infoRect, xRadius: 6, yRadius: 6).fill()
+
+            let swatch = NSRect(x: infoRect.minX + 6, y: infoRect.minY + 5, width: 14, height: 14)
+            color.setFill()
+            NSBezierPath(roundedRect: swatch, xRadius: 2, yRadius: 2).fill()
+            NSColor.white.withAlphaComponent(0.4).setStroke()
+            NSBezierPath(roundedRect: swatch, xRadius: 2, yRadius: 2).stroke()
+
+            let r = Int((color.redComponent * 255).rounded())
+            let g = Int((color.greenComponent * 255).rounded())
+            let b = Int((color.blueComponent * 255).rounded())
+            let hex = String(format: "#%02X%02X%02X", r, g, b)
+            let label = "\(hex)  \(r),\(g),\(b)"
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+                .foregroundColor: NSColor.white
+            ]
+            let text = NSAttributedString(string: label, attributes: attrs)
+            text.draw(at: NSPoint(x: infoRect.minX + 26, y: infoRect.minY + 6))
+        }
+    }
+
+    /// Copy the pixel color under the cursor to the pasteboard as a HEX
+    /// string. Triggered by pressing `C` in region mode. Returns true if a
+    /// color was actually copied so the caller can avoid beeping.
+    @discardableResult
+    func copyColorUnderCursor() -> Bool {
+        guard captureMode == .region,
+              let cursor = cursorPoint,
+              let color = pixelColor(at: cursor) else { return false }
+        let r = Int((color.redComponent * 255).rounded())
+        let g = Int((color.greenComponent * 255).rounded())
+        let b = Int((color.blueComponent * 255).rounded())
+        let hex = String(format: "#%02X%02X%02X", r, g, b)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(hex, forType: .string)
+        return true
     }
 
     private static func rect(from a: NSPoint, to b: NSPoint) -> NSRect {
