@@ -130,6 +130,21 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            GroupBox("Universal Clipboard (Handoff)") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Record content that can be kept permanently (text, rich text, images)",
+                           isOn: $settings.recordHandoffPersistent)
+                    Toggle("Record content that can't be kept permanently (files on the source Mac)",
+                           isOn: $settings.recordHandoffEphemeral)
+                    Text("Items copied on another Mac signed into the same Apple ID arrive via Universal Clipboard. Permanent items are saved locally and stay usable; file references live on the source Mac and may fail to paste once it's offline. Handoff items are marked with an antenna badge.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             GroupBox("Snippets") {
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle("Expand snippet abbreviations as you type",

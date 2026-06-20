@@ -438,6 +438,14 @@ struct ClipboardItemRow: View, Equatable {
                     if let bundleID = item.sourceBundleID {
                         SourceAppBadge(bundleID: bundleID)
                     }
+                    if item.isFromHandoff {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .help(item.contentType == .fileURL
+                                  ? "From another device (Handoff) — file lives on the source Mac and may not paste once it's offline"
+                                  : "From another device (Handoff)")
+                    }
                     Text(relativeTimestamp)
                         .font(.caption2)
                         .foregroundColor(.secondary)

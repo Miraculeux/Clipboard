@@ -38,6 +38,10 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
     // Cached pasteboard type constants (avoid reconstructing each tick).
     private static let fileURLType = NSPasteboard.PasteboardType("public.file-url")
     private static let multiFileType = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+    // Private flavor macOS stamps onto the pasteboard when the content
+    // arrived from another device via Universal Clipboard (Handoff). Its
+    // presence is how we tell a remote copy apart from a local ⌘C.
+    private static let remoteClipboardType = NSPasteboard.PasteboardType("com.apple.is-remote-clipboard")
 
     // Background save: coalesce rapid mutations into one write.
     private let saveQueue = DispatchQueue(label: "ClipboardKit.save", qos: .utility)
@@ -147,11 +151,25 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         let ourBundle = Bundle.main.bundleIdentifier
         let sourceBundleID: String? = (frontBundle == ourBundle) ? nil : frontBundle
 
+        // Did this content come from another device via Universal Clipboard
+        // (Handoff)? macOS stamps a private flavor we can sniff for. We split
+        // Handoff content into two buckets when deciding whether to record:
+        //   • "persistent" — text / rich text / images. We read and persist
+        //     the bytes locally at capture time, so the entry is usable
+        //     forever even after the source device leaves.
+        //   • "ephemeral"  — file references. The paths live on the source
+        //     Mac; once it's unreachable they can't be pasted. Off by default.
+        let isFromHandoff = pasteboard.types?.contains(Self.remoteClipboardType) ?? false
+
         // Check for file URLs first (Finder copy)
         // Files are detected via the pasteboard types that Finder sets
         let hasFiles = pasteboard.types?.contains(where: { $0 == Self.fileURLType || $0 == Self.multiFileType }) ?? false
 
         if hasFiles {
+            // File references from Handoff are the non-permanent bucket —
+            // skip entirely unless the user opted in.
+            if isFromHandoff && !settings.recordHandoffEphemeral { return }
+
             var filePaths: [String] = []
 
             // Try reading filenames from the legacy plist-based type
@@ -190,13 +208,19 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                         filePaths: captured,
                         originalSize: totalSize,
                         sourceBundleID: sourceBundleID,
-                        isScreenshot: isScreenshot
+                        isScreenshot: isScreenshot,
+                        isFromHandoff: isFromHandoff
                     )
                     self?.addItem(item)
                 }
                 return
             }
         }
+
+        // Everything below (image / rich text / plain text) is the
+        // "persistent" Handoff bucket — we copy the bytes locally, so the
+        // entry survives the source device leaving. Honor the opt-out.
+        if isFromHandoff && !settings.recordHandoffPersistent { return }
 
         // Image: read on main (NSPasteboard isn't thread-safe), then hand the
         // raw Data off to a background queue for PNG encode + disk write.
@@ -207,7 +231,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             let isAlreadyPNG = pngData != nil
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
-                let item = self.saveImageItem(data: imageData, isAlreadyPNG: isAlreadyPNG, sourceBundleID: sourceBundleID)
+                let item = self.saveImageItem(data: imageData, isAlreadyPNG: isAlreadyPNG, sourceBundleID: sourceBundleID, isFromHandoff: isFromHandoff)
                 self.addItem(item)
             }
             return
@@ -233,7 +257,8 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                     fileName: sidecarPath,
                     filePaths: nil,
                     originalSize: originalSize,
-                    sourceBundleID: sourceBundleID
+                    sourceBundleID: sourceBundleID,
+                    isFromHandoff: isFromHandoff
                 )
                 self.addItem(item)
             }
@@ -254,7 +279,8 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
                     fileName: sidecar,
                     filePaths: nil,
                     originalSize: originalSize,
-                    sourceBundleID: sourceBundleID
+                    sourceBundleID: sourceBundleID,
+                    isFromHandoff: isFromHandoff
                 )
                 self.addItem(item)
             }
@@ -307,7 +333,7 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func saveImageItem(data: Data, isAlreadyPNG: Bool, sourceBundleID: String? = nil) -> ClipboardItem {
+    private func saveImageItem(data: Data, isAlreadyPNG: Bool, sourceBundleID: String? = nil, isFromHandoff: Bool = false) -> ClipboardItem {
         let fileName = UUID().uuidString + ".png"
 
         // Always store images in the user-chosen storage location.
@@ -353,7 +379,8 @@ class ClipboardManager: ObservableObject, @unchecked Sendable {
             originalSize: data.count,
             sourceBundleID: sourceBundleID,
             contentHash: hash,
-            isScreenshot: isScreenshot
+            isScreenshot: isScreenshot,
+            isFromHandoff: isFromHandoff
         )
     }
 

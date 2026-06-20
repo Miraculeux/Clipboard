@@ -74,6 +74,13 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     /// the search bar so users can find captures by the text they show.
     /// `nil` = never run; empty string = ran and found nothing.
     var ocrText: String?
+    /// True when this item arrived via macOS Universal Clipboard (Handoff)
+    /// from another device rather than being copied locally. Detected at
+    /// capture time via the private `com.apple.is-remote-clipboard`
+    /// pasteboard type. Used to badge the row and to gate capture behind
+    /// the Handoff recording settings. `false` for local copies and items
+    /// captured before this field shipped.
+    var isFromHandoff: Bool
 
     enum ContentType: String, Codable {
         case text
@@ -94,7 +101,8 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
          sourceBundleID: String? = nil,
          contentHash: String? = nil,
          isScreenshot: Bool = false,
-         ocrText: String? = nil) {
+         ocrText: String? = nil,
+         isFromHandoff: Bool = false) {
         self.id = id
         self.timestamp = timestamp
         self.contentType = contentType
@@ -108,6 +116,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.contentHash = contentHash
         self.isScreenshot = isScreenshot
         self.ocrText = ocrText
+        self.isFromHandoff = isFromHandoff
     }
 
     /// Custom decoder so payloads written before `isPinned` / `linkPreview` /
@@ -117,7 +126,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, timestamp, contentType, textContent, fileName, filePaths,
              originalSize, isPinned, linkPreview, sourceBundleID, contentHash,
-             isScreenshot, ocrText
+             isScreenshot, ocrText, isFromHandoff
     }
 
     init(from decoder: Decoder) throws {
@@ -135,6 +144,7 @@ struct ClipboardItem: Identifiable, Codable, Equatable {
         self.contentHash = try c.decodeIfPresent(String.self, forKey: .contentHash)
         self.isScreenshot = try c.decodeIfPresent(Bool.self, forKey: .isScreenshot) ?? false
         self.ocrText = try c.decodeIfPresent(String.self, forKey: .ocrText)
+        self.isFromHandoff = try c.decodeIfPresent(Bool.self, forKey: .isFromHandoff) ?? false
     }
 
     var displayText: String {

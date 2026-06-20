@@ -22,6 +22,8 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         static let restoreClipboardAfterPaste = "restoreClipboardAfterPaste"
         static let deduplicateEntries = "deduplicateEntries"
         static let snippetAbbreviationsEnabled = "snippetAbbreviationsEnabled"
+        static let recordHandoffPersistent = "recordHandoffPersistent"
+        static let recordHandoffEphemeral = "recordHandoffEphemeral"
         static func hotkeyKeyCode(_ action: HotkeyAction) -> String { "hotkey.\(action.rawValue).keyCode" }
         static func hotkeyModifiers(_ action: HotkeyAction) -> String { "hotkey.\(action.rawValue).modifiers" }
     }
@@ -118,6 +120,23 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// When on, content arriving via Universal Clipboard (Handoff) that we
+    /// can capture in full and keep forever — text, rich text, images — is
+    /// recorded into history. We read the bytes at capture time and persist
+    /// them locally, so the entry stays usable even after the source device
+    /// goes away. Default on.
+    @Published var recordHandoffPersistent: Bool {
+        didSet { defaults.set(recordHandoffPersistent, forKey: Keys.recordHandoffPersistent) }
+    }
+
+    /// When on, Handoff content that we *cannot* hold onto permanently —
+    /// file references that live on the source device — is also recorded.
+    /// These entries point at files on the other Mac, so they may fail to
+    /// paste once that device is unreachable. Default off.
+    @Published var recordHandoffEphemeral: Bool {
+        didSet { defaults.set(recordHandoffEphemeral, forKey: Keys.recordHandoffEphemeral) }
+    }
+
     var largeFileThresholdBytes: Int {
         largeFileThresholdMB * 1_000_000
     }
@@ -168,6 +187,12 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         if defaults.object(forKey: Keys.snippetAbbreviationsEnabled) == nil {
             defaults.set(false, forKey: Keys.snippetAbbreviationsEnabled)
         }
+        if defaults.object(forKey: Keys.recordHandoffPersistent) == nil {
+            defaults.set(true, forKey: Keys.recordHandoffPersistent)
+        }
+        if defaults.object(forKey: Keys.recordHandoffEphemeral) == nil {
+            defaults.set(false, forKey: Keys.recordHandoffEphemeral)
+        }
 
         self.maxHistoryCount = defaults.integer(forKey: Keys.maxHistoryCount)
         self.largeFileStoragePath = defaults.string(forKey: Keys.largeFileStoragePath) ?? defaultStoragePath
@@ -183,6 +208,8 @@ class SettingsManager: ObservableObject, @unchecked Sendable {
         self.restoreClipboardAfterPaste = defaults.bool(forKey: Keys.restoreClipboardAfterPaste)
         self.deduplicateEntries = defaults.bool(forKey: Keys.deduplicateEntries)
         self.snippetAbbreviationsEnabled = defaults.bool(forKey: Keys.snippetAbbreviationsEnabled)
+        self.recordHandoffPersistent = defaults.bool(forKey: Keys.recordHandoffPersistent)
+        self.recordHandoffEphemeral = defaults.bool(forKey: Keys.recordHandoffEphemeral)
 
         // Ensure storage directory exists
         ensureStorageDirectoryExists()
