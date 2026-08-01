@@ -30,6 +30,13 @@ final class ScreenshotCapture: @unchecked Sendable {
     }
     private var lastCapture: LastCapture?
 
+    /// Frozen per-screen snapshots captured the instant the overlay came up
+    /// (before our app activates). Region captures crop directly from these
+    /// so transient windows — menus, popovers, the Books chapter panel —
+    /// that dismiss the moment our overlay steals focus are still present in
+    /// the delivered image. Cleared on teardown.
+    private var sessionSnapshots: [NSScreen: CGImage] = [:]
+
     private init() {}
 
     /// Show the selection overlay across every screen. No-op if already active.
@@ -148,6 +155,7 @@ final class ScreenshotCapture: @unchecked Sendable {
                 snapshots[screen] = img
             }
         }
+        sessionSnapshots = snapshots
 
         overlayWindows = NSScreen.screens.map { screen in
             let w = SelectionWindow(screen: screen, snapshot: snapshots[screen])
@@ -256,13 +264,28 @@ final class ScreenshotCapture: @unchecked Sendable {
     /// `targetScreen` is the screen the selection was made on.
     @MainActor
     func finish(with screenRect: NSRect, on targetScreen: NSScreen) {
+        let frozen = sessionSnapshots[targetScreen]
         teardown()
         lastCapture = .region(screenRect, targetScreen)
-        // Give the windows a moment to actually disappear from the compositor
-        // before snapping the screen, otherwise the dim overlay would be captured.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        if let frozen {
+            // Crop the region the user actually selected out of the frozen
+            // overlay snapshot. This is WYSIWYG (the delivered image matches
+            // exactly what was on screen when the hotkey fired) and, crucially,
+            // preserves transient windows that would have vanished by the time
+            // a fresh live capture runs — our overlay activating dismisses
+            // menus, popovers, and panels like the Books chapter view.
             Task { @MainActor in
-                await self.captureAndCopy(screenRect: screenRect, screen: targetScreen)
+                await self.cropAndCopy(frozen: frozen, screenRect: screenRect, screen: targetScreen)
+            }
+        } else {
+            // No frozen snapshot on hand (e.g. repeatLast has no overlay
+            // session). Fall back to a fresh live capture, giving the windows a
+            // moment to disappear from the compositor before snapping the
+            // screen, otherwise the dim overlay would be captured.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                Task { @MainActor in
+                    await self.captureAndCopy(screenRect: screenRect, screen: targetScreen)
+                }
             }
         }
     }
@@ -302,7 +325,43 @@ final class ScreenshotCapture: @unchecked Sendable {
     private func teardown() {
         overlayWindows.forEach { $0.orderOut(nil) }
         overlayWindows.removeAll()
+        sessionSnapshots.removeAll()
         isActive = false
+    }
+
+    /// Crop the user's selection out of the frozen overlay snapshot and
+    /// deliver it. Used for region captures so the result matches what the
+    /// user saw and keeps transient windows that a live re-capture would lose.
+    @MainActor
+    private func cropAndCopy(frozen: CGImage, screenRect: NSRect, screen: NSScreen) async {
+        let scale = screen.backingScaleFactor
+        // Convert the AppKit global rect (origin bottom-left of the primary
+        // display) into pixel coordinates within the frozen image, whose
+        // origin is top-left and whose size is the screen's point size × scale.
+        let originX = (screenRect.origin.x - screen.frame.origin.x) * scale
+        let originYFromTop = (screen.frame.height - ((screenRect.origin.y - screen.frame.origin.y) + screenRect.height)) * scale
+        let cropRect = CGRect(
+            x: originX.rounded(),
+            y: originYFromTop.rounded(),
+            width: (screenRect.width * scale).rounded(),
+            height: (screenRect.height * scale).rounded()
+        ).intersection(CGRect(x: 0, y: 0, width: frozen.width, height: frozen.height))
+
+        guard !cropRect.isNull, cropRect.width >= 1, cropRect.height >= 1,
+              let cropped = frozen.cropping(to: cropRect) else {
+            NSSound.beep()
+            return
+        }
+
+        let bitmap = NSBitmapImageRep(cgImage: cropped)
+        guard let pngData = bitmap.representation(using: .png, properties: [:]) else {
+            print("Screenshot: failed to encode cropped image data")
+            NSSound.beep()
+            return
+        }
+
+        let image = NSImage(cgImage: cropped, size: screenRect.size)
+        CaptureOutput.shared.deliver(pngData: pngData, image: image)
     }
 
     @MainActor
@@ -380,6 +439,18 @@ final class ScreenshotCapture: @unchecked Sendable {
             guard let scWindow = content.windows.first(where: { $0.windowID == windowID }) else {
                 NSSound.beep()
                 return
+            }
+
+            // The window's traffic-light buttons (close/minimize/zoom) render
+            // gray while it isn't the active app's key window — which is the
+            // state our overlay leaves it in after stealing focus. Reactivate
+            // the owning app and give the buttons a beat to repaint so they're
+            // captured in color. SCK grabs the window content regardless of
+            // z-order, so bringing it forward only restores the active look.
+            if let pid = scWindow.owningApplication?.processID,
+               let app = NSRunningApplication(processIdentifier: pid) {
+                app.activate()
+                try? await Task.sleep(nanoseconds: 150_000_000)
             }
 
             let filter = SCContentFilter(desktopIndependentWindow: scWindow)
